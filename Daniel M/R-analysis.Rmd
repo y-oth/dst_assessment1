@@ -8,4 +8,334 @@ date: "2025-10-28"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+```{r}
+library(fs)
+library(readr)
+library(ggplot2)
+library(knitr)
+library(dplyr)
+```
+
+## The setup
+
+
+```{r}
+data <- read_csv(path_wd("..", "data", "processed", "odi_bbb_recent.csv"))
+```
+
+We are trying to predict the outcome of the game based off the first 10 Overs. Hence, we can only train our model on data we would have by the end of the first 10 Overs, such as, what teams are playing, what is the run rate so far, how many wickets have been taken so far etc. This is to prevent data leakage, ie, it would be extremely easy to work out who would have won the game at the end when we have a final score. This kind of problem is similar to how sports betting companies set odds. Therefore, we are not only interested in the outcome of the game but rather how confident we are in that outcome (hence accuracy is not a suitable measure of performance for our models).
+
+To make this a binary classification problem, we consider whether team1 wins or not. This is obviously equivalent to predicting who won the game. First I filter the data so we only consider the first 10 overs of the first innings (~10% of the game). 
+
+```{r}
+first10_overs <- data %>%
+  mutate(over = floor(ball)) %>%
+  filter(innings == 1, over >= 0, over < 10)
+
+#Now summarise the game info we have so far:
+
+#Per Over summary (for feature engineering later)
+
+over_summary <- first10_balls %>%
+  mutate(runs = (coalesce(runs_off_bat, 0) + coalesce(extras, 0))) %>%
+  group_by(match_id, over) %>%
+  summarise(
+    over_runs = sum(runs, na.rm = TRUE),
+    over_boundaries = sum((runs_off_bat %in% c(4,6)), na.rm = TRUE),
+    over_wickets = sum(!is.na(player_dismissed)),
+    over_dotballs = sum((coalesce(runs_off_bat,0) == 0), na.rm = TRUE),
+    balls_in_over = n(),
+    .groups = "drop"
+  )
+
+
+#Summary of the first 10 overs
+
+first10_summary <- first10_balls %>%
+  mutate(runs = (coalesce(runs_off_bat, 0) + coalesce(extras, 0))) %>%
+  group_by(match_id) %>%
+  summarise(
+    batting_team = first(batting_team),
+    bowling_team = first(bowling_team),
+    balls_played = n(),                         
+    overs_played = balls_played / 6,
+    runs_total = sum(runs, na.rm = TRUE),
+    boundaries = sum((runs_off_bat %in% c(4,6)), na.rm = TRUE),
+    wickets = sum(!is.na(player_dismissed)),
+    dot_balls = sum((coalesce(runs_off_bat,0) == 0), na.rm = TRUE),
+    extras_total = sum(coalesce(extras,0), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    run_rate_per_over = runs_total / pmax(overs_played, 1/6),    # avoid division by zero
+    boundary_rate = boundaries / pmax(balls_played, 1),
+    dot_ball_rate = dot_balls / pmax(balls_played, 1),
+    wickets_rate = wickets / pmax(overs_played, 1/6),
+    avg_runs_per_wicket = runs_total / pmax(wickets, 1)
+  )
+```
+
+
+Now we do some feature engineering to try and get some numerical measure for 'momentum' in the game
+
+```{r}
+over_rollups <- over_summary %>%
+  group_by(match_id) %>%
+  summarise(
+    first3_runs = sum(over_runs[over %in% 0:2], na.rm = TRUE),
+    last3_runs  = sum(over_runs[over %in% 7:9], na.rm = TRUE),
+    first3_boundaries = sum(over_boundaries[over %in% 0:2], na.rm = TRUE),
+    last3_boundaries  = sum(over_boundaries[over %in% 7:9], na.rm = TRUE),
+    first3_balls = sum(balls_in_over[over %in% 0:2], na.rm = TRUE),
+    last3_balls = sum(balls_in_over[over %in% 7:9], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    first3_rr = first3_runs / pmax(first3_balls / 6, 1/6),
+    last3_rr  = last3_runs  / pmax(last3_balls / 6, 1/6),
+    acceleration = last3_rr - first3_rr,
+    boundary_momentum = (last3_boundaries / pmax(last3_balls,1)) - (first3_boundaries / pmax(first3_balls,1))
+  )
+```
+
+```{r}
+#Now we take the info we know prior to the match beginning:
+
+match_meta <- data %>%
+  distinct(match_id, team1, team2, winner, toss_winner, toss_decision, season) %>%
+  group_by(match_id) %>%
+  # if multiple rows identical, reduce to first; if inconsistent, this will need manual attention
+  summarise(
+    team1 = first(team1),
+    team2 = first(team2),
+    winner = first(winner),
+    toss_winner = first(toss_winner),
+    toss_decision = first(toss_decision),
+    season = first(season),
+    .groups = "drop"
+  )
+```
+
+Now combine it to make our model data frame:
+
+```{r}
+model_df <- first10_summary %>%
+  left_join(over_rollups, by = "match_id") %>%
+  left_join(match_meta, by = "match_id")
+
+
+glimpse(model_df)
+```
+
+Clearly we have a lot of columns/ features here and not all of them will have predictive value. Therefore we will have to do some form of feature selection or regularization process. Furthermore, consider the pairs plot of some of this data, we can see they are highly correlated. For example, runs total and run rate contain the same information just scaled and so the model using both is redundant and could possibly lead to over inflated effects of increased runs (ie both run rate and runs increases causing a larger effect than is true).
+
+```{r}
+pairs(model_df[, c("runs_total", "run_rate_per_over", "wickets", 
+                   "wickets_rate", "boundaries", "boundary_rate")])
+
+```
+
+We also have a number of categorical features (including out target feature, who wins), which we want to convert into numerical data points by one-hot encoding.
+
+```{r}
+model_df <- model_df %>%
+  filter(!is.na(winner)) %>%
+  mutate(
+    team1_win = ifelse(winner == team1, 1L, 0L),
+    team1_win_toss = as.integer(team1 == toss_winner),
+    batting_team_is_team1 = as.integer(batting_team == team1),
+    toss_decision = as.integer(toss_decision == "field")
+    
+  )
+
+
+model_df <- model_df %>%
+  select(-batting_team, -winner, -toss_winner, -bowling_team, -balls_played, -overs_played)
+
+```
+
+We now have 31 columns due to all the different teams and seasons. This is a very large number considering 
+
+```{r}
+dim(model_df)
+```
+```{r}
+cat("Rows (matches) in modeling data:", nrow(model_df), "\n")
+model_df %>% count(team1_win) %>% print()
+```
+We can see that team1 inherently wins slightly more often. From the EDA done previously this is because every home team is listed as team1, (although not every team1 is at home, they could both be away) and hence there is an implicit, slight home bias in this data.
+
+
+# Linear Classification Methods
+
+This section will focus on applying linear classification methods such as logistic regression and linear SVM. I have chosen these methods because the data set is small and quite noisy. 
+
+
+Lets fit an initial logistic model.
+
+```{r}
+model_df$team1_win <- as.numeric(model_df$team1_win)
+
+# Split into train/test (80/20)
+set.seed(123)
+trainIndex <- createDataPartition(model_df$team1_win, p = 0.8, list = FALSE)
+train_data <- model_df[trainIndex, ]
+test_data  <- model_df[-trainIndex, ]
+
+# Fit logistic regression model
+logit_model <- glm(team1_win ~ . -match_id, data = train_data, family = binomial)
+
+
+summary(logit_model)
+
+```
+
+Here we have some NAs because some predictors are perfect linear combinations of the other. For example first3_rr, 
+
+$$\text{first3_rr} = \frac{\text{first3_runs}}{\text{first3_balls}/6}$$
+
+Hence we will drop all redundant (non-rate) variables.
+
+```{r}
+train_data <- train_data %>%
+  select(-last3_rr, -last3_balls, -first3_balls, -last3_boundaries, -last3_runs, -dot_balls, -runs_total, -wickets_rate, -boundaries)
+
+test_data <- test_data %>%
+  select(-last3_rr, -last3_balls, -first3_balls, -last3_boundaries, -last3_runs, -dot_balls, -runs_total, -wickets_rate, -boundaries)
+```
+
+
+```{r}
+# Fit logistic regression model
+logit_model <- glm(team1_win ~ . -match_id, data = train_data, family = binomial)
+
+
+summary(logit_model)
+```
+
+
+
+```{r}
+# Predict probabilities on test set
+pred_probs <- predict(logit_model, newdata = test_data, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(pred_probs > 0.5, 1, 0)
+
+# Confusion matrix
+confusionMatrix(
+  as.factor(pred_classes),
+  as.factor(test_data$team1_win),
+  positive = "1"
+)
+
+# ROC curve and AUC
+roc_obj <- roc(test_data$team1_win, pred_probs)
+
+# Plot ROC curve
+plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_obj)
+print(paste("AUC =", round(auc_value, 3)))
+```
+
+This is encouraging, we have a relatively large (close to 1) AUC, and we haven't done any feature selection yet. We will now perform feature selection through L1 regularization (LASSO). This penalty that is added can force the coefficient of some features to 0, effectively performing feature selection. It appears currently that many of our features are irrelevant (large p-value on t-test) and so this should help prevent over fitting by only selecting important variables.
+
+```{r}
+library(glmnet)
+
+# Prepare data
+x_train <- model.matrix(team1_win ~ . - match_id, data = train_data)[, -1]  # remove intercept column
+y_train <- train_data$team1_win
+
+x_test <- model.matrix(team1_win ~ . - match_id, data = test_data)[, -1]  # remove intercept column
+
+y_test <- test_data$team1_win
+
+lambda_seq <- 10^seq(-6, 2, length=200)
+
+# Fit LASSO logistic regression (L1 penalty)
+set.seed(123)
+cv_lasso <- cv.glmnet(
+  x, y,
+  alpha = 1,              # LASSO penalty (L1)
+  lambda = lambda_seq,
+  family = "binomial",
+  type.measure = "auc",   # use AUC for CV performance
+  nfolds = 10             # 10-fold cross-validation
+)
+
+# Plot cross-validation results
+plot(cv_lasso)
+
+# Best lambda values
+cv_lasso$lambda.min     # lambda that gives best mean cross-validated AUC
+cv_lasso$lambda.1se     # largest lambda within 1 SE of best AUC (more regularization)
+
+# Refit model at best lambda
+lasso_model <- glmnet(x, y, alpha = 1, family = "binomial", lambda = cv_lasso$lambda.min)
+
+
+
+
+```
+
+```{r}
+coef(lass)
+```
+
+
+```{r}
+# Predict probabilities on test set
+# pred_probs <- predict(lasso_model, newx= x_test, type = "response")
+
+
+```
+
+The columns don't match up because there is no Jersey in the x test set. 
+
+```{r}
+# Identify missing columns
+missing_cols <- setdiff(colnames(x_train), colnames(x_test))
+missing_cols
+# [1] "team1Jersey" "team2Jersey"
+
+# Add missing columns to test matrix
+for (col in missing_cols) {
+  x_test <- cbind(x_test, setNames(data.frame(rep(0, nrow(x_test))), col))
+}
+
+# Ensure column order matches training
+x_test <- x_test[, colnames(x_train)]
+
+
+x_test <- as.matrix(x_test)
+```
+```{r}
+# Predict probabilities on test set
+pred_probs <- predict(lasso_model, newx= x_test, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(pred_probs > 0.5, 1, 0)
+
+# Confusion matrix
+confusionMatrix(
+  as.factor(pred_classes),
+  as.factor(test_data$team1_win),
+  positive = "1"
+)
+
+# ROC curve and AUC
+roc_obj <- roc(test_data$team1_win, pred_probs)
+
+# Plot ROC curve
+plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_obj)
+print(paste("AUC =", round(auc_value, 3)))
+```
 
