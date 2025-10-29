@@ -36,7 +36,7 @@ first10_overs <- data %>%
 
 #Per Over summary (for feature engineering later)
 
-over_summary <- first10_balls %>%
+over_summary <- first10_overs %>%
   mutate(runs = (coalesce(runs_off_bat, 0) + coalesce(extras, 0))) %>%
   group_by(match_id, over) %>%
   summarise(
@@ -51,14 +51,14 @@ over_summary <- first10_balls %>%
 
 #Summary of the first 10 overs
 
-first10_summary <- first10_balls %>%
+first10_summary <- first10_overs %>%
   mutate(runs = (coalesce(runs_off_bat, 0) + coalesce(extras, 0))) %>%
   group_by(match_id) %>%
   summarise(
     batting_team = first(batting_team),
     bowling_team = first(bowling_team),
     balls_played = n(),                         
-    overs_played = balls_played / 6,
+    overs_played = 10,
     runs_total = sum(runs, na.rm = TRUE),
     boundaries = sum((runs_off_bat %in% c(4,6)), na.rm = TRUE),
     wickets = sum(!is.na(player_dismissed)),
@@ -102,16 +102,14 @@ over_rollups <- over_summary %>%
 #Now we take the info we know prior to the match beginning:
 
 match_meta <- data %>%
-  distinct(match_id, team1, team2, winner, toss_winner, toss_decision, season) %>%
+  distinct(match_id, team1, team2, winner, toss_winner, toss_decision) %>%
   group_by(match_id) %>%
-  # if multiple rows identical, reduce to first; if inconsistent, this will need manual attention
   summarise(
     team1 = first(team1),
     team2 = first(team2),
     winner = first(winner),
     toss_winner = first(toss_winner),
     toss_decision = first(toss_decision),
-    season = first(season),
     .groups = "drop"
   )
 ```
@@ -138,7 +136,7 @@ pairs(model_df[, c("runs_total", "run_rate_per_over", "wickets",
 We also have a number of categorical features (including out target feature, who wins), which we want to convert into numerical data points by one-hot encoding.
 
 ```{r}
-model_df <- model_df %>%
+model_df1 <- model_df %>%
   filter(!is.na(winner)) %>%
   mutate(
     team1_win = ifelse(winner == team1, 1L, 0L),
@@ -149,65 +147,104 @@ model_df <- model_df %>%
   )
 
 
-model_df <- model_df %>%
-  select(-batting_team, -winner, -toss_winner, -bowling_team, -balls_played, -overs_played)
+#One hot encode teams
+model_df1$team1 <- factor(model_df1$team1)
+model_df1$team2 <- factor(model_df1$team2)
+
+team1_encoded <- model.matrix(~ team1 - 1, data = model_df1)
+team2_encoded <- model.matrix(~ team2 - 1, data = model_df1)
+
+# Rename columns to avoid duplicates and make them meaningful
+colnames(team1_encoded) <- paste0("team1_", gsub("team1", "", colnames(team1_encoded)))
+colnames(team2_encoded) <- paste0("team2_", gsub("team2", "", colnames(team2_encoded)))
+
+# Combine with original data (excluding original team columns)
+model_df1 <- cbind(
+  model_df1[, !names(model_df1) %in% c("team1", "team2")],
+  team1_encoded,
+  team2_encoded
+)
+
+#Colnames for feature selection
+team1_encoded_cols <- colnames(team1_encoded)
+team2_encoded_cols <- colnames(team2_encoded)
+
+
+model_df1 <- model_df1 %>%
+  select(match_id, all_of(team1_encoded_cols), all_of(team2_encoded_cols), team1_win,
+         batting_team_is_team1,
+         runs_total, run_rate_per_over, boundaries, boundary_rate,
+         wickets, wickets_rate, dot_balls, dot_ball_rate, extras_total,
+         first3_rr, last3_rr, acceleration, boundary_momentum,
+         team1_win_toss, toss_decision)
 
 ```
 
-We now have 31 columns due to all the different teams and seasons. This is a very large number considering 
+We now have 27 columns due to all the different teams and seasons. This is a very large number considering 
 
 ```{r}
-dim(model_df)
+dim(model_df1)
 ```
 ```{r}
-cat("Rows (matches) in modeling data:", nrow(model_df), "\n")
-model_df %>% count(team1_win) %>% print()
+cat("Rows (matches) in modeling data:", nrow(model_df1), "\n")
+model_df1 %>% count(team1_win) %>% print()
 ```
 We can see that team1 inherently wins slightly more often. From the EDA done previously this is because every home team is listed as team1, (although not every team1 is at home, they could both be away) and hence there is an implicit, slight home bias in this data.
 
 
 # Linear Classification Methods
 
-This section will focus on applying linear classification methods such as logistic regression and linear SVM. I have chosen these methods because the data set is small and quite noisy. 
+This section will focus on applying linear classification methods such as logistic regression and linear SVM. I have chosen these methods because the data set is small and quite noisy. However, there are clear non-linearities we need to capture by this model. If team1 is batting first - then wickets are a bad things and runs good, the opposite is true in the reverse case. Therefore we can try to capture this using interactions. 
 
 
 Lets fit an initial logistic model.
 
 ```{r}
-model_df$team1_win <- as.numeric(model_df$team1_win)
+model_df1$team1_win <- as.numeric(model_df1$team1_win)
 
 # Split into train/test (80/20)
 set.seed(123)
-trainIndex <- createDataPartition(model_df$team1_win, p = 0.8, list = FALSE)
-train_data <- model_df[trainIndex, ]
-test_data  <- model_df[-trainIndex, ]
+trainIndex <- createDataPartition(model_df1$team1_win, p = 0.8, list = FALSE)
+train_data <- model_df1[trainIndex, ]
+test_data  <- model_df1[-trainIndex, ]
 
 # Fit logistic regression model
-logit_model <- glm(team1_win ~ . -match_id, data = train_data, family = binomial)
+# Single logistic regression with interactions
+logit_model <- glm(
+  team1_win ~  . - match_id,
+  data = train_data,
+  family = binomial
+)
 
 
 summary(logit_model)
 
 ```
 
-Here we have some NAs because some predictors are perfect linear combinations of the other. For example first3_rr, 
+Here we have some redundant because some predictors are perfect linear combinations of the other. For example acceleration, 
 
-$$\text{first3_rr} = \frac{\text{first3_runs}}{\text{first3_balls}/6}$$
+$$\text{acceleration} = \text{last3_rr}-\text{first3_rr}$$
+
+
 
 Hence we will drop all redundant (non-rate) variables.
 
 ```{r}
 train_data <- train_data %>%
-  select(-last3_rr, -last3_balls, -first3_balls, -last3_boundaries, -last3_runs, -dot_balls, -runs_total, -wickets_rate, -boundaries)
+  select(-last3_rr)
 
 test_data <- test_data %>%
-  select(-last3_rr, -last3_balls, -first3_balls, -last3_boundaries, -last3_runs, -dot_balls, -runs_total, -wickets_rate, -boundaries)
+  select(-last3_rr)
 ```
 
 
 ```{r}
 # Fit logistic regression model
-logit_model <- glm(team1_win ~ . -match_id, data = train_data, family = binomial)
+logit_model <- glm(
+  team1_win ~ batting_team_is_team1 * (wickets_rate + dot_ball_rate + run_rate_per_over + acceleration + boundary_momentum + boundary_rate + first3_rr) + . - match_id,
+  data = train_data,
+  family = binomial
+)
 
 
 summary(logit_model)
@@ -247,10 +284,10 @@ This is encouraging, we have a relatively large (close to 1) AUC, and we haven't
 library(glmnet)
 
 # Prepare data
-x_train <- model.matrix(team1_win ~ . - match_id, data = train_data)[, -1]  # remove intercept column
+x_train <- model.matrix(team1_win ~ batting_team_is_team1 * (wickets_rate + dot_ball_rate + run_rate_per_over + acceleration + boundary_momentum + boundary_rate +first3_rr) + . - match_id, data = train_data)[, -1]  # remove intercept column
 y_train <- train_data$team1_win
 
-x_test <- model.matrix(team1_win ~ . - match_id, data = test_data)[, -1]  # remove intercept column
+x_test <- model.matrix(team1_win ~ batting_team_is_team1 * (wickets_rate + dot_ball_rate + run_rate_per_over + acceleration + boundary_momentum + boundary_rate + first3_rr) + . - match_id, data = test_data)[, -1]  # remove intercept column
 
 y_test <- test_data$team1_win
 
@@ -259,7 +296,7 @@ lambda_seq <- 10^seq(-6, 2, length=200)
 # Fit LASSO logistic regression (L1 penalty)
 set.seed(123)
 cv_lasso <- cv.glmnet(
-  x, y,
+  x_train, y_train,
   alpha = 1,              # LASSO penalty (L1)
   lambda = lambda_seq,
   family = "binomial",
@@ -275,7 +312,7 @@ cv_lasso$lambda.min     # lambda that gives best mean cross-validated AUC
 cv_lasso$lambda.1se     # largest lambda within 1 SE of best AUC (more regularization)
 
 # Refit model at best lambda
-lasso_model <- glmnet(x, y, alpha = 1, family = "binomial", lambda = cv_lasso$lambda.min)
+lasso_model <- glmnet(x_train, y_train, alpha = 1, family = "binomial", lambda = cv_lasso$lambda.min)
 
 
 
@@ -283,7 +320,7 @@ lasso_model <- glmnet(x, y, alpha = 1, family = "binomial", lambda = cv_lasso$la
 ```
 
 ```{r}
-coef(lass)
+coef(lasso_model)
 ```
 
 
@@ -300,7 +337,7 @@ The columns don't match up because there is no Jersey in the x test set.
 # Identify missing columns
 missing_cols <- setdiff(colnames(x_train), colnames(x_test))
 missing_cols
-# [1] "team1Jersey" "team2Jersey"
+
 
 # Add missing columns to test matrix
 for (col in missing_cols) {
@@ -329,6 +366,261 @@ confusionMatrix(
 
 # ROC curve and AUC
 roc_obj <- roc(test_data$team1_win, pred_probs)
+
+# Plot ROC curve
+plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_obj)
+print(paste("AUC =", round(auc_value, 3)))
+```
+
+# Sensitivity test model:
+
+```{r}
+# Start with all columns = 0
+scenario <- as.data.frame(matrix(0, nrow = 1, ncol = ncol(train_data)))
+colnames(scenario) <- colnames(train_data)
+
+# Set categorical indicators
+scenario$team1_Australia <- 1
+scenario$team2_Canada <- 1
+
+# Set contextual features
+scenario$batting_team_is_team1 <- 1
+scenario$runs_total <- 40         # runs after 10 overs
+scenario$run_rate_per_over <- 4
+scenario$boundaries <- 8
+scenario$boundary_rate <- 0.8
+scenario$wickets <- 7
+scenario$wickets_rate <- 0.7      # 5 wickets / 10 overs
+scenario$dot_balls <- 30
+scenario$dot_ball_rate <- 0.3
+scenario$extras_total <- 2
+scenario$first3_rr <- 5.5
+scenario$acceleration <- 0.1
+scenario$boundary_momentum <- -0.2
+scenario$team1_win_toss <- 1
+scenario$toss_decision <- 0
+
+```
+
+```{r}
+x_scenario <- model.matrix(
+  team1_win ~ batting_team_is_team1 * (wickets_rate + dot_ball_rate +
+    run_rate_per_over + acceleration + boundary_momentum + boundary_rate + first3_rr) + . - match_id,
+  data = scenario
+)[, -1]
+
+prob_win <- predict(lasso_model, newx = x_scenario, type = "response")
+prob_win
+```
+
+Instead predict whether batting team wins:
+
+
+```{r}
+model_df2 <- model_df %>%
+  filter(!is.na(winner)) %>%
+  mutate(
+    batting_team_win = ifelse(winner == batting_team, 1L, 0L),
+    batting_team_win_toss = as.integer(batting_team == toss_winner),
+  )
+
+
+#One hot encode teams
+model_df2$batting_team <- factor(model_df2$batting_team)
+model_df2$bowling_team <- factor(model_df2$bowling_team)
+
+batting_encoded <- model.matrix(~ batting_team - 1, data = model_df2)
+bowling_encoded <- model.matrix(~ bowling_team - 1, data = model_df2)
+
+# Rename columns to avoid duplicates and make them meaningful
+colnames(batting_encoded) <- paste0("batting_", gsub("team1", "", colnames(batting_encoded)))
+colnames(bowling_encoded) <- paste0("bowling_", gsub("team2", "", colnames(bowling_encoded)))
+
+# Combine with original data (excluding original team columns)
+model_df2 <- cbind(
+  model_df2[, !names(model_df2) %in% c("batting_team", "bowling_team")],
+  batting_encoded,
+  bowling_encoded
+)
+
+#Colnames for feature selection
+batting_encoded_cols <- colnames(batting_encoded)
+bowling_encoded_cols <- colnames(bowling_encoded)
+
+
+model_df2 <- model_df2 %>%
+  select(match_id, all_of(batting_encoded_cols), all_of(bowling_encoded_cols), batting_team_win,
+         runs_total, run_rate_per_over, boundaries, boundary_rate,
+         wickets, wickets_rate, dot_balls, dot_ball_rate, extras_total,
+         first3_rr, last3_rr, acceleration, boundary_momentum,
+         batting_team_win_toss)
+```
+
+```{r}
+model_df2$batting_team_win <- as.numeric(model_df2$batting_team_win)
+
+# Split into train/test (80/20)
+set.seed(123)
+trainIndex <- createDataPartition(model_df2$batting_team_win, p = 0.8, list = FALSE)
+train_data2 <- model_df2[trainIndex, ]
+test_data2  <- model_df2[-trainIndex, ]
+
+# Fit logistic regression model
+# Single logistic regression with interactions
+logit_model2 <- glm(
+  batting_team_win ~  . - match_id,
+  data = train_data2,
+  family = binomial
+)
+
+
+summary(logit_model2)
+```
+```{r}
+train_data2 <- train_data2 %>%
+  select(-last3_rr, -run_rate_per_over, -wickets_rate)
+
+
+test_data2 <- test_data2 %>%
+  select(-last3_rr, -run_rate_per_over, -wickets_rate)
+```
+
+```{r}
+logit_model2 <- glm(
+  batting_team_win ~  . - match_id,
+  data = train_data2,
+  family = binomial
+)
+
+
+summary(logit_model2)
+```
+```{r}
+# Predict probabilities on test set
+pred_probs <- predict(logit_model2, newdata = test_data2, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(pred_probs > 0.5, 1, 0)
+
+# Confusion matrix
+confusionMatrix(
+  as.factor(pred_classes),
+  as.factor(test_data2$batting_team_win),
+  positive = "1"
+)
+
+# ROC curve and AUC
+roc_obj <- roc(test_data2$batting_team_win, pred_probs)
+
+# Plot ROC curve
+plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_obj)
+print(paste("AUC =", round(auc_value, 3)))
+```
+
+```{r}
+# Start with all columns = 0
+scenario <- as.data.frame(matrix(0, nrow = 1, ncol = ncol(train_data2)))
+colnames(scenario) <- colnames(train_data2)
+
+# Set categorical indicators
+scenario$batting_batting_teamAustralia <- 1
+scenario$bowling_bowling_teamCanada <- 1
+
+# Set contextual features
+scenario$runs_total <- 40         # runs after 10 overs
+scenario$boundaries <- 8
+scenario$boundary_rate <- 0.8
+scenario$wickets <- 7     
+scenario$dot_balls <- 30
+scenario$dot_ball_rate <- 0.3
+scenario$extras_total <- 2
+scenario$first3_rr <- 5.5
+scenario$acceleration <- 0.1
+scenario$boundary_momentum <- -0.2
+scenario$batting_team_win_toss <- 1
+```
+
+```{r}
+prob_win <- predict(logit_model2, newdata = scenario, type = "response")
+prob_win
+
+```
+```{r}
+library(glmnet)
+
+# Prepare data
+x_train2 <- model.matrix(batting_team_win ~ . - match_id, data = train_data2)[, -1]  # remove intercept column
+y_train2 <- train_data2$batting_team_win
+
+x_test2 <- model.matrix(batting_team_win ~ . - match_id, data = test_data2)[, -1]  # remove intercept column
+
+y_test2 <- test_data2$batting_team_win
+
+lambda_seq <- 10^seq(-6, 2, length=200)
+
+# Fit LASSO logistic regression (L1 penalty)
+set.seed(123)
+cv_lasso2 <- cv.glmnet(
+  x_train, y_train,
+  alpha = 1,              # LASSO penalty (L1)
+  lambda = lambda_seq,
+  family = "binomial",
+  type.measure = "auc",   # use AUC for CV performance
+  nfolds = 10             # 10-fold cross-validation
+)
+
+# Plot cross-validation results
+plot(cv_lasso2)
+
+# Best lambda values
+cv_lasso2$lambda.min     # lambda that gives best mean cross-validated AUC
+cv_lasso2$lambda.1se     # largest lambda within 1 SE of best AUC (more regularization)
+
+# Refit model at best lambda
+lasso_model2 <- glmnet(x_train2, y_train2, alpha = 1, family = "binomial", lambda = cv_lasso2$lambda.min)
+
+
+
+
+```
+
+
+```{r}
+# Identify missing columns
+missing_cols <- setdiff(colnames(x_train2), colnames(x_test2))
+missing_cols
+
+
+# Add missing columns to test matrix
+for (col in missing_cols) {
+  x_test2 <- cbind(x_test2, setNames(data.frame(rep(0, nrow(x_test2))), col))
+}
+
+# Ensure column order matches training
+x_test2 <- x_test2[, colnames(x_train2)]
+
+
+x_test2 <- as.matrix(x_test2)
+```
+```{r}
+# Predict probabilities on test set
+pred_probs <- predict(lasso_model2, newx= x_test2, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(pred_probs > 0.5, 1, 0)
+
+
+
+# ROC curve and AUC
+roc_obj <- roc(test_data2$batting_team_win, pred_probs)
 
 # Plot ROC curve
 plot(roc_obj, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
