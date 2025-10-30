@@ -14,6 +14,8 @@ library(readr)
 library(ggplot2)
 library(knitr)
 library(dplyr)
+library(caret)
+library(pROC)
 ```
 
 ## The setup
@@ -426,6 +428,7 @@ model_df2 <- model_df %>%
   mutate(
     batting_team_win = ifelse(winner == batting_team, 1L, 0L),
     batting_team_win_toss = as.integer(batting_team == toss_winner),
+    batting_team_is_team1 = as.integer(batting_team == team1),
   )
 
 
@@ -457,8 +460,9 @@ model_df2 <- model_df2 %>%
          runs_total, run_rate_per_over, boundaries, boundary_rate,
          wickets, wickets_rate, dot_balls, dot_ball_rate, extras_total,
          first3_rr, last3_rr, acceleration, boundary_momentum,
-         batting_team_win_toss)
+         batting_team_win_toss, batting_team_is_team1)
 ```
+
 
 ```{r}
 model_df2$batting_team_win <- as.numeric(model_df2$batting_team_win)
@@ -546,6 +550,9 @@ scenario$first3_rr <- 5.5
 scenario$acceleration <- 0.1
 scenario$boundary_momentum <- -0.2
 scenario$batting_team_win_toss <- 1
+
+
+x_scenario2 <- model.matrix(batting_team_win ~ . - match_id, data = scenario)[, -1]
 ```
 
 ```{r}
@@ -611,6 +618,12 @@ x_test2 <- x_test2[, colnames(x_train2)]
 x_test2 <- as.matrix(x_test2)
 ```
 ```{r}
+coef(lasso_model2)
+```
+
+
+
+```{r}
 # Predict probabilities on test set
 pred_probs <- predict(lasso_model2, newx= x_test2, type = "response")
 
@@ -630,4 +643,164 @@ abline(a = 0, b = 1, lty = 2, col = "gray")
 auc_value <- auc(roc_obj)
 print(paste("AUC =", round(auc_value, 3)))
 ```
+```{r}
+prob_win <- predict(lasso_model2, newx = x_scenario2, type = "response")
+prob_win
+```
+
+
+
+
+
+```{r}
+# # Prepare data
+# x_train2 <- model.matrix(batting_team_win ~ . - match_id, data = train_data2)[, -1]  # remove intercept column
+# y_train2 <- train_data2$batting_team_win
+# 
+# x_test2 <- model.matrix(batting_team_win ~ . - match_id, data = test_data2)[, -1]  # remove intercept column
+# 
+# y_test2 <- test_data2$batting_team_win
+# 
+# # Convert to XGBoost DMatrix format
+# dtrain <- xgb.DMatrix(data = x_train2, label = y_train2)
+# dtest  <- xgb.DMatrix(data = x_test2, label = y_test2)
+# 
+# #---------------------------------
+# # 2. Cross-validated Training
+# #---------------------------------
+# params <- list(
+#   objective = "binary:logistic",  # logistic regression for classification
+#   eval_metric = "auc",            # use AUC for performance
+#   booster = "gbtree",
+#   eta = 0.05,                     # learning rate
+#   max_depth = 6,
+#   subsample = 0.8,
+#   colsample_bytree = 0.8
+# )
+# 
+# set.seed(123)
+# xgb_cv <- xgb.cv(
+#   params = params,
+#   data = dtrain,
+#   nrounds = 500,
+#   nfold = 5,
+#   early_stopping_rounds = 20,
+#   verbose = 0
+# )
+# 
+# best_nrounds <- xgb_cv$best_iteration
+# 
+# #---------------------------------
+# # 3. Fit Final Model
+# #---------------------------------
+# xgb_model <- xgb.train(
+#   params = params,
+#   data = dtrain,
+#   nrounds = best_nrounds,
+#   watchlist = list(train = dtrain, test = dtest),
+#   verbose = 0
+# )
+# 
+# #---------------------------------
+# # 4. Predictions & Performance
+# #---------------------------------
+# pred_probs <- predict(xgb_model, dtest)
+# pred_labels <- ifelse(pred_probs > 0.5, 1, 0)
+# 
+# auc_score <- roc(y_test2, pred_probs)$auc
+# cat("Test AUC:", auc_score, "\n")
+# 
+# #---------------------------------
+# # 5. Feature Importance
+# #---------------------------------
+# importance <- xgb.importance(model = xgb_model)
+# xgb.plot.importance(importance)
+```
+```{r}
+
+# #-------------------------------------------------------------
+# # Random Search Parameter Grid
+# #-------------------------------------------------------------
+# set.seed(42)
+# 
+# n_search <- 50  # number of random combinations
+# param_grid <- data.frame(
+#   eta = runif(n_search, 0.01, 0.5),
+#   max_depth = sample(3:10, n_search, replace = TRUE),
+#   subsample = runif(n_search, 0.6, 1),
+#   colsample_bytree = runif(n_search, 0.6, 1)
+# )
+# 
+# results <- data.frame()
+# 
+# #-------------------------------------------------------------
+# # Random Search Cross-Validation
+# #-------------------------------------------------------------
+# for (i in 1:n_search) {
+#   params <- list(
+#     objective = "binary:logistic",
+#     eval_metric = "auc",
+#     eta = param_grid$eta[i],
+#     max_depth = param_grid$max_depth[i],
+#     subsample = param_grid$subsample[i],
+#     colsample_bytree = param_grid$colsample_bytree[i]
+#   )
+#   
+#   cv <- xgb.cv(
+#     params = params,
+#     data = dtrain,
+#     nrounds = 500,
+#     nfold = 5,
+#     early_stopping_rounds = 30,
+#     verbose = 0
+#   )
+#   
+#   best_iter <- cv$best_iteration
+#   best_auc <- cv$evaluation_log$test_auc_mean[best_iter]
+#   
+#   results <- rbind(results, cbind(param_grid[i, ], best_iter, best_auc))
+# }
+# 
+# #-------------------------------------------------------------
+# # Choose Best Parameters
+# #-------------------------------------------------------------
+# best_params <- results[which.max(results$best_auc), ]
+# print(best_params)
+# 
+# #-------------------------------------------------------------
+# # Train Final Model with Best Parameters
+# #-------------------------------------------------------------
+# final_params <- list(
+#   objective = "binary:logistic",
+#   eval_metric = "auc",
+#   eta = best_params$eta,
+#   max_depth = best_params$max_depth,
+#   subsample = best_params$subsample,
+#   colsample_bytree = best_params$colsample_bytree
+# )
+# 
+# xgb_final <- xgb.train(
+#   params = final_params,
+#   data = dtrain,
+#   nrounds = best_params$best_iter,
+#   watchlist = list(train = dtrain, test = dtest),
+#   print_every_n = 20,
+#   early_stopping_rounds = 30
+# )
+# 
+# #-------------------------------------------------------------
+# # Evaluate Performance
+# #-------------------------------------------------------------
+# pred_probs <- predict(xgb_final, dtest)
+# auc_test <- roc(y_test2, pred_probs)$auc
+# cat("\nTest AUC:", round(auc_test, 4), "\n")
+```
+
+Overfitting so include regularization etc.
+
+
+
+
+
+
 
