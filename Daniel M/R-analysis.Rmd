@@ -144,36 +144,19 @@ model_df1 <- model_df %>%
     team1_win = ifelse(winner == team1, 1L, 0L),
     team1_win_toss = as.integer(team1 == toss_winner),
     batting_team_is_team1 = as.integer(batting_team == team1),
-    toss_decision = as.integer(toss_decision == "field")
+    toss_decision = as.integer(toss_decision == "field"),
+    batting_team = factor(batting_team),
+    bowling_team = factor(bowling_team),
+    team1 = factor(team1),
+    team2 = factor(team2)
     
   )
 
 
-#One hot encode teams
-model_df1$team1 <- factor(model_df1$team1)
-model_df1$team2 <- factor(model_df1$team2)
-
-team1_encoded <- model.matrix(~ team1 - 1, data = model_df1)
-team2_encoded <- model.matrix(~ team2 - 1, data = model_df1)
-
-# Rename columns to avoid duplicates and make them meaningful
-colnames(team1_encoded) <- paste0("team1_", gsub("team1", "", colnames(team1_encoded)))
-colnames(team2_encoded) <- paste0("team2_", gsub("team2", "", colnames(team2_encoded)))
-
-# Combine with original data (excluding original team columns)
-model_df1 <- cbind(
-  model_df1[, !names(model_df1) %in% c("team1", "team2")],
-  team1_encoded,
-  team2_encoded
-)
-
-#Colnames for feature selection
-team1_encoded_cols <- colnames(team1_encoded)
-team2_encoded_cols <- colnames(team2_encoded)
 
 
 model_df1 <- model_df1 %>%
-  select(match_id, all_of(team1_encoded_cols), all_of(team2_encoded_cols), team1_win,
+  select(match_id, team1, team2, team1_win,
          batting_team_is_team1,
          runs_total, run_rate_per_over, boundaries, boundary_rate,
          wickets, wickets_rate, dot_balls, dot_ball_rate, extras_total,
@@ -386,8 +369,9 @@ scenario <- as.data.frame(matrix(0, nrow = 1, ncol = ncol(train_data)))
 colnames(scenario) <- colnames(train_data)
 
 # Set categorical indicators
-scenario$team1_Australia <- 1
-scenario$team2_Canada <- 1
+scenario$team1 <- factor("Australia", levels = levels(train_data$team1))
+scenario$team2 <- factor("Canada", levels = levels(train_data$team2))
+
 
 # Set contextual features
 scenario$batting_team_is_team1 <- 1
@@ -429,34 +413,18 @@ model_df2 <- model_df %>%
     batting_team_win = ifelse(winner == batting_team, 1L, 0L),
     batting_team_win_toss = as.integer(batting_team == toss_winner),
     batting_team_is_team1 = as.integer(batting_team == team1),
+    batting_team = factor(batting_team),
+    bowling_team = factor(bowling_team),
+    team1 = factor(team1),
+    team2 = factor(team2)
+    
   )
 
 
-#One hot encode teams
-model_df2$batting_team <- factor(model_df2$batting_team)
-model_df2$bowling_team <- factor(model_df2$bowling_team)
-
-batting_encoded <- model.matrix(~ batting_team - 1, data = model_df2)
-bowling_encoded <- model.matrix(~ bowling_team - 1, data = model_df2)
-
-# Rename columns to avoid duplicates and make them meaningful
-colnames(batting_encoded) <- paste0("batting_", gsub("team1", "", colnames(batting_encoded)))
-colnames(bowling_encoded) <- paste0("bowling_", gsub("team2", "", colnames(bowling_encoded)))
-
-# Combine with original data (excluding original team columns)
-model_df2 <- cbind(
-  model_df2[, !names(model_df2) %in% c("batting_team", "bowling_team")],
-  batting_encoded,
-  bowling_encoded
-)
-
-#Colnames for feature selection
-batting_encoded_cols <- colnames(batting_encoded)
-bowling_encoded_cols <- colnames(bowling_encoded)
 
 
 model_df2 <- model_df2 %>%
-  select(match_id, all_of(batting_encoded_cols), all_of(bowling_encoded_cols), batting_team_win,
+  select(match_id, batting_team, bowling_team, batting_team_win,
          runs_total, run_rate_per_over, boundaries, boundary_rate,
          wickets, wickets_rate, dot_balls, dot_ball_rate, extras_total,
          first3_rr, last3_rr, acceleration, boundary_momentum,
@@ -535,8 +503,8 @@ scenario <- as.data.frame(matrix(0, nrow = 1, ncol = ncol(train_data2)))
 colnames(scenario) <- colnames(train_data2)
 
 # Set categorical indicators
-scenario$batting_batting_teamAustralia <- 1
-scenario$bowling_bowling_teamCanada <- 1
+scenario$batting_team <- factor("Australia", levels = levels(train_data2$batting_team))
+scenario$bowling_team <- factor("Canada", levels = levels(train_data2$bowling_team))
 
 # Set contextual features
 scenario$runs_total <- 40         # runs after 10 overs
@@ -573,11 +541,11 @@ y_test2 <- test_data2$batting_team_win
 
 lambda_seq <- 10^seq(-6, 2, length=200)
 
-# Fit LASSO logistic regression (L1 penalty)
+# Fit LASSO logistic regression (L2 penalty)
 set.seed(123)
 cv_lasso2 <- cv.glmnet(
   x_train, y_train,
-  alpha = 1,              # LASSO penalty (L1)
+  alpha = 0,              # Ridge-Regression penalty (L2)
   lambda = lambda_seq,
   family = "binomial",
   type.measure = "auc",   # use AUC for CV performance
@@ -589,7 +557,6 @@ plot(cv_lasso2)
 
 # Best lambda values
 cv_lasso2$lambda.min     # lambda that gives best mean cross-validated AUC
-cv_lasso2$lambda.1se     # largest lambda within 1 SE of best AUC (more regularization)
 
 # Refit model at best lambda
 lasso_model2 <- glmnet(x_train2, y_train2, alpha = 1, family = "binomial", lambda = cv_lasso2$lambda.min)
@@ -600,23 +567,7 @@ lasso_model2 <- glmnet(x_train2, y_train2, alpha = 1, family = "binomial", lambd
 ```
 
 
-```{r}
-# Identify missing columns
-missing_cols <- setdiff(colnames(x_train2), colnames(x_test2))
-missing_cols
 
-
-# Add missing columns to test matrix
-for (col in missing_cols) {
-  x_test2 <- cbind(x_test2, setNames(data.frame(rep(0, nrow(x_test2))), col))
-}
-
-# Ensure column order matches training
-x_test2 <- x_test2[, colnames(x_train2)]
-
-
-x_test2 <- as.matrix(x_test2)
-```
 ```{r}
 coef(lasso_model2)
 ```
@@ -798,9 +749,61 @@ prob_win
 
 Overfitting so include regularization etc.
 
+```{r}
+library(glmnet)
 
+# Prepare data
+x_train2 <- model.matrix(batting_team_win ~ . - match_id, data = train_data2)[, -1]  # remove intercept
+y_train2 <- train_data2$batting_team_win
 
+x_test2 <- model.matrix(batting_team_win ~ . - match_id, data = test_data2)[, -1]  # remove intercept
+y_test2 <- test_data2$batting_team_win
 
+# Grid of alpha values to try
+alpha_grid <- seq(0, 1, by = 0.1)  # from Ridge (0) to LASSO (1)
+lambda_seq <- 10^seq(-6, 2, length = 200)
 
+# Store CV results
+cv_results <- list()
+cv_auc <- numeric(length(alpha_grid))
 
+set.seed(123)
+for (i in seq_along(alpha_grid)) {
+  cv <- cv.glmnet(
+    x_train2, y_train2,
+    alpha = alpha_grid[i],
+    lambda = lambda_seq,
+    family = "binomial",
+    type.measure = "auc",
+    nfolds = 10
+  )
+  cv_results[[i]] <- cv
+  cv_auc[i] <- max(cv$cvm)  # best AUC for this alpha
+}
+
+# Find alpha with best CV AUC
+best_alpha <- alpha_grid[which.max(cv_auc)]
+best_lambda <- cv_results[[which.max(cv_auc)]]$lambda.min
+
+cat("Best alpha:", best_alpha, "\n")
+cat("Best lambda:", best_lambda, "\n")
+
+# Refit final elastic net model on full training set
+final_model <- glmnet(
+  x_train2, y_train2,
+  alpha = best_alpha,
+  lambda = best_lambda,
+  family = "binomial"
+)
+
+# Predict on test set
+test_pred_prob <- predict(final_model, newx = x_test2, type = "response")
+test_pred_class <- ifelse(test_pred_prob > 0.5, 1, 0)
+
+# Evaluate test AUC
+library(pROC)
+roc_obj <- roc(y_test2, as.numeric(test_pred_prob))
+auc(roc_obj)
+
+```
 

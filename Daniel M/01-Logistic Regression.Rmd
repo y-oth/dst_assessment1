@@ -1,0 +1,211 @@
+---
+title: "Logistic Regression"
+output: html_document
+date: "2025-10-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this section we give a brief overview of what Logistic Regression is and how it works. It was written using [1] and [2].
+
+Logistic regression us a generalised linear model (GLM) used for classification problems. It can be extended for multinomial classification, however, as our problem is binary, that is where we will focus. Hence, it models the 'probability' of a binary outcome $Y \in \{0,1\}$ as a function of the input features $X=(X_1,...X_p)$. Instead of predicting $Y$ directly, like in linear regression, logistic regression predictes the probability that $Y=1$:
+
+$$p(x)=P(Y=1|X=x).$$ As it is modelling probability we want its output to be contatined in $[0,1]$. Hence, we use the logit link function to map the linear combination of predictors to $[0,1]$:
+
+$$\text{logit}(p)= \log \frac{p}{1-p}= \beta_0+\beta_1X_1+...+\beta_pX_p$$
+
+Or equivalently,
+
+$$p(x)=(1+\text{exp}(-(\beta_0+\beta_1X_1+...+\beta_pX_p)))^{-1}$$ Where $\beta_i$ are the coefficients of the model, which are often then predicted using maximum likelihood estimates. Consider the likelihood function:
+
+$$L(\boldsymbol{\beta})=\prod_{i=1}^{n}p(x_i)^{y_i}(1-p(x_i))^{1-y_i}$$ Maximising this function would be equivalent to getting to trying to get the predicted probabilities as close to the true values of y as possible. Therefore, if $y_i=1$, we want $p(x_i)$ close to 1 and the reverse when $y_i=0$.
+
+## Assumptions of Logistic Regression
+
+-   $Y$ is binary.
+
+-   Each observation is independent of the others.
+
+-   There is little to no multicollinearity among the predictors. This is something we will address directly.
+
+-   Log-odds of $Y$ linearly related to the predictors. If this is violated our predictions may be biased.
+
+# Preparing the Data
+
+```{r}
+library(fs)
+library(readr)
+library(ggplot2)
+library(knitr)
+library(dplyr)
+library(caret)
+library(pROC)
+library(glmnet)
+```
+
+We start by importing the data from project 0.
+
+```{r}
+data <- read_csv(path_wd("..", "data", "processed", "odi_bbb_recent.csv"))
+```
+
+This gives the ball-by-ball data for all ODI matches from 2015 on-wards, however, we are trying to predict the outcome of the game based off the first 10 Overs. Hence, we can only train our model on data we would have by the end of the first 10 Overs, such as, what teams are playing, what is the run rate so far, how many wickets have been taken so far etc. This is to prevent data leakage, ie, it would be extremely easy to work out who would have won the game at the end when we have a final score. This kind of problem is similar to how sports betting companies set odds. Therefore, we are not only interested in the outcome of the game but rather how confident we are in that outcome (hence accuracy is not a suitable measure of performance for our models).
+
+To make this a binary classification problem, we consider whether team1 wins or not. This is obviously equivalent to predicting who won the game. First I filter the data so we only consider the first 10 overs of the first innings (\~10% of the game).
+
+```{r}
+first10_overs <- data %>%
+  mutate(over = floor(ball)) %>%
+  filter(innings == 1, over >= 0, over < 10)
+
+#Now summarise the game info we have so far:
+
+#Per Over summary (for feature engineering later)
+
+over_summary <- first10_overs %>%
+  mutate(runs = (coalesce(runs_off_bat, 0) + coalesce(extras, 0))) %>%
+  group_by(match_id, over) %>%
+  summarise(
+    over_runs = sum(runs, na.rm = TRUE),
+    over_boundaries = sum((runs_off_bat %in% c(4,6)), na.rm = TRUE),
+    over_wickets = sum(!is.na(player_dismissed)),
+    over_dotballs = sum((coalesce(runs_off_bat,0) == 0), na.rm = TRUE),
+    balls_in_over = n(),
+    .groups = "drop"
+  )
+
+
+#Summary of the first 10 overs
+
+first10_summary <- first10_overs %>%
+  mutate(runs = (coalesce(runs_off_bat, 0) + coalesce(extras, 0))) %>%
+  group_by(match_id) %>%
+  summarise(
+    batting_team = first(batting_team),
+    bowling_team = first(bowling_team),
+    balls_played = n(),                         
+    overs_played = 10,
+    runs_total = sum(runs, na.rm = TRUE),
+    boundaries = sum((runs_off_bat %in% c(4,6)), na.rm = TRUE),
+    wickets = sum(!is.na(player_dismissed)),
+    dot_balls = sum((coalesce(runs_off_bat,0) == 0), na.rm = TRUE),
+    extras_total = sum(coalesce(extras,0), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    run_rate_per_over = runs_total / pmax(overs_played, 1/6),    # avoid division by zero
+    boundary_rate = boundaries / pmax(balls_played, 1),
+    dot_ball_rate = dot_balls / pmax(balls_played, 1),
+    wickets_rate = wickets / pmax(overs_played, 1/6),
+    avg_runs_per_wicket = runs_total / pmax(wickets, 1)
+  )
+```
+
+Now we do some feature engineering to try and get some numerical measure for 'momentum' in the game.
+
+```{r}
+over_rollups <- over_summary %>%
+  group_by(match_id) %>%
+  summarise(
+    first3_runs = sum(over_runs[over %in% 0:2], na.rm = TRUE),
+    last3_runs  = sum(over_runs[over %in% 7:9], na.rm = TRUE),
+    first3_boundaries = sum(over_boundaries[over %in% 0:2], na.rm = TRUE),
+    last3_boundaries  = sum(over_boundaries[over %in% 7:9], na.rm = TRUE),
+    first3_balls = sum(balls_in_over[over %in% 0:2], na.rm = TRUE),
+    last3_balls = sum(balls_in_over[over %in% 7:9], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    first3_rr = first3_runs / pmax(first3_balls / 6, 1/6),
+    last3_rr  = last3_runs  / pmax(last3_balls / 6, 1/6),
+    acceleration = last3_rr - first3_rr,
+    boundary_momentum = (last3_boundaries / pmax(last3_balls,1)) - (first3_boundaries / pmax(first3_balls,1))
+  )
+```
+
+```{r}
+#Now we take the info we know prior to the match beginning:
+
+match_meta <- data %>%
+  distinct(match_id, team1, team2, winner, toss_winner, toss_decision) %>%
+  group_by(match_id) %>%
+  summarise(
+    team1 = first(team1),
+    team2 = first(team2),
+    winner = first(winner),
+    toss_winner = first(toss_winner),
+    toss_decision = first(toss_decision),
+    .groups = "drop"
+  )
+```
+
+Now combine it to make our model data frame:
+
+```{r}
+model_df <- first10_summary %>%
+  left_join(over_rollups, by = "match_id") %>%
+  left_join(match_meta, by = "match_id")
+
+
+glimpse(model_df)
+```
+
+Clearly we have a lot of columns/ features here and not all of them will have predictive value. Therefore we will have to do some form of feature selection or regularization process. Furthermore, consider the pairs plot of some of this data, we can see they are highly correlated. For example, runs total and run rate contain the same information just scaled and so the model using both is redundant and could possibly lead to over inflated effects of increased runs (ie both run rate and runs increases causing a larger effect than is true). This also violates the assumption we laid out in the introduction.
+
+```{r}
+pairs(model_df[, c("runs_total", "run_rate_per_over", "wickets", 
+                   "wickets_rate", "boundaries", "boundary_rate")])
+
+```
+
+We also have a number of categorical features (including out target feature, who wins), which we want to convert into numerical data points by one-hot encoding.
+
+```{r}
+model_df1 <- model_df %>%
+  filter(!is.na(winner)) %>%
+  mutate(
+    team1_win = ifelse(winner == team1, 1L, 0L),
+    team1_win_toss = as.integer(team1 == toss_winner),
+    batting_team_is_team1 = as.integer(batting_team == team1),
+    toss_decision = as.integer(toss_decision == "field"),
+    batting_team = factor(batting_team),
+    bowling_team = factor(bowling_team),
+    team1 = factor(team1),
+    team2 = factor(team2)
+    
+  )
+
+
+
+
+model_df1 <- model_df1 %>%
+  select(match_id, team1, team2, team1_win,
+         batting_team_is_team1,
+         runs_total, run_rate_per_over, boundaries, boundary_rate,
+         wickets, wickets_rate, dot_balls, dot_ball_rate, extras_total,
+         first3_rr, last3_rr, acceleration, boundary_momentum,
+         team1_win_toss, toss_decision)
+
+```
+
+We now have 20 columns due to all the different teams. This is a very large number considering the number of observations we have, and that we haven't considered all of the dummy variables that will be created by the team factors. Therefore we will need to do some variable selection to reduce collinearity and prevent over-fitting.
+
+```{r}
+dim(model_df1)
+```
+
+Now lets check the balance of our dataset. There is a slight imbalance which favours team1. This is partly due to the implicit "home-advantage" that is captured within this dataset. Although the number of venues made it difficult to capture an exact home/away variable, any team that plays at home is put as team1 in the data set. That does not, however, mean that every team in team1 is playing at home. I attempt to loosely capture the variation from this fact with the variable *batting_team_is_team1*.
+
+```{r}
+model_df1 %>% count(team1_win) %>% print()
+```
+
+## References
+
+[1] <https://www.geeksforgeeks.org/machine-learning/understanding-logistic-regression/>
+
+[2] James, G., Witten, D., Hastie, T., & Tibshirani, R. (2021). An Introduction to Statistical Learning, 2nd Edition. Springer. (Ch. 4: Classification)
