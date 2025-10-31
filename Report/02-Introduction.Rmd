@@ -1,0 +1,49 @@
+---
+title: "02-Introduction"
+output: html_document
+date: "2025-10-31"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Comparing model performance is a key task in data science, particularly when evaluating predictive models in a real world context. In this group project, we examine an binary classification problem involving cricket data: predicting the outcome of One Day International (ODI) cricket matches using data from the *cricketdata* R package. Our objective is to determine whether our models can accurately forecast the winning team based on the information available at different stages of a match.
+
+To test this, we build two sets of models:
+
+1.  Using data from the first 10 overs of the first innings (\~10% of the match)
+
+2.  Using data from the entire first innings plus the first 10 overs of the second innings (\~60%)
+
+This comparison of stages allows us to assess whether model performance improves as in game information becomes available. This ensures that our models are dynamic, rather than predicting purely off metadata such as which countries are playing, which we know prior to the game. This improvement becomes a secondary way to evaluate the performance of our models, as a kind of sensitivity test to data availability (obviously if our model outperforms regardless of this, that model is still preferable).
+
+## Choice of Performance Metric
+
+Our primary method of evaluating the performance of our models will be the Receiver Operating Characteristic Curve (ROC) and the area underneath the curve (AUC) [1] when ROC curves are too similar to compare by eye. This metric will be evaluated on a test data set created using a random 80/20 train/test split of the data using *seed 123* so our results are comparable. The ROC curve is a plot of the True Positive Rate (TPR) against the False Positive Rate (FPR) across all classification thresholds.
+
+Unlike accuracy, which relies on a fixed decision threshold and simply measures the fraction of correct predictions, the AUC provides a threshold-independent measure of a classifier's ability to discriminate between classes. If we consider the AUC mathematically, it is equivalent to the probability that a randomly chosen winning team is assigned a higher predictive probability of winning than a randomly chosen losing team:
+
+$$
+AUC = P(\hat{y}_{win} > \hat{y}_{loss}),
+$$
+
+where $\hat{y}_{win}$ and $\hat{y}_{loss}$ are the model's predicted probabilities. Hence, it is a natural choice for comparing models in our project, as it reflects how well the model separates winners from losers, without needing to make arbitrary threshold decisions. The AUC evaluates the model's ability to rank predictions correctly, making it particularly useful for applications where relative probabilities matter more than binary decisions.
+
+### Real-World Relevance
+
+In real world context, this approach is similar to how betting companies and sports analysts assess predictive models. For example, betting markets are not interested in the final classification, they are more interested in the predicted probabilities which are estimates of the likelihood of a team to win. A model with a high AUC can better distinguish between likely and unlikely winners, which would lead to more accurate odds-setting.
+
+### Limitations of AUC
+
+Whilst AUC is good at measuring the ranking ability of a classifier it doesn't tell you how well calibrated the model is, i.e how close the predicted probabilities match the true likelihoods. This is bad because you could have a model with a high AUC which systematically overestimates probabilities, which would lead to odds being set wrong. There are other metrics such as the Brier Score [2] and Callibration plot [3] which attempt to fix this, however, they are usually more complicated to implement, where as AUC is a common method which is built into many functions automatically. Ultimately, we decided that the main aim of our project was to correctly rank outcomes rather than evaluate the exact probability estimates.
+
+## References
+
+[1] Google Developers Machine Learning Crash Course. “Classification: ROC and AUC.”  Available at: [https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc](https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc?utm_source=chatgpt.com)
+
+[2] Brier, G. W. (1950). *Verification of forecasts expressed in terms of probability.* Monthly Weather Review, 78(1), 1–3
+
+[3] DeGroot, M. H., & Fienberg, S. E. (1983). *The comparison and evaluation of forecasters.* The Statistician, 32(1/2), 12–22.
