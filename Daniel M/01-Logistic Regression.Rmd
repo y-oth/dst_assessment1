@@ -30,7 +30,7 @@ $$L(\boldsymbol{\beta})=\prod_{i=1}^{n}p(x_i)^{y_i}(1-p(x_i))^{1-y_i}$$ Maximisi
 
 -   Each observation is independent of the others.
 
--   There is little to no multicollinearity among the predictors. This is something we will address directly.
+-   There is little to no multi-collinearity among the predictors. This is something we will address directly.
 
 -   Log-odds of $Y$ linearly related to the predictors. If this is violated our predictions may be biased.
 
