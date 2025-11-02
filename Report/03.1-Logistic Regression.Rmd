@@ -1,0 +1,634 @@
+---
+title: "Logistic Regression"
+output: html_document
+date: "2025-10-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this section we give a brief overview of what Logistic Regression is and how it works. It was written using [1] and [2].
+
+Logistic regression us a generalised linear model (GLM) used for classification problems. It can be extended for multinomial classification, however, as our problem is binary, that is where we will focus. Hence, it models the 'probability' of a binary outcome $Y \in \{0,1\}$ as a function of the input features $X=(X_1,...X_p)$. Instead of predicting $Y$ directly, like in linear regression, logistic regression predictes the probability that $Y=1$:
+
+$$p(x)=P(Y=1|X=x).$$ As it is modelling probability we want its output to be contatined in $[0,1]$. Hence, we use the logit link function to map the linear combination of predictors to $[0,1]$:
+
+$$\text{logit}(p)= \log \frac{p}{1-p}= \beta_0+\beta_1X_1+...+\beta_pX_p$$
+
+Or equivalently,
+
+$$p(x)=(1+\text{exp}(-(\beta_0+\beta_1X_1+...+\beta_pX_p)))^{-1}$$ Where $\beta_i$ are the coefficients of the model, which are often then predicted using maximum likelihood estimates. Consider the likelihood function:
+
+$$L(\boldsymbol{\beta})=\prod_{i=1}^{n}p(x_i)^{y_i}(1-p(x_i))^{1-y_i}$$ Maximising this function would be equivalent to getting to trying to get the predicted probabilities as close to the true values of y as possible. Therefore, if $y_i=1$, we want $p(x_i)$ close to 1 and the reverse when $y_i=0$.
+
+## Assumptions of Logistic Regression
+
+-   $Y$ is binary.
+
+-   Each observation is independent of the others.
+
+-   There is little to no multi-collinearity among the predictors. This is something we will address directly.
+
+-   Log-odds of $Y$ linearly related to the predictors. If this is violated our predictions may be biased.
+
+### Why Logistic Regression?
+
+We have a relatively small data set of \~1000 observations. This means that non-linear, flexible models such as XGBoost have a high variance with small data. Hence, these models are unstable and prone to over fitting. In comparison, logistic regression only estimates a small, number of parameters and has much less variance. By using regularization we can avoid over fitting even more. Therefore, even if the true relationship is non-linear, a simple linear decision boundary can out perform a flexible one when there isn't enough data to learn the non-linear structure reliably [4].
+
+# Preparing the Data
+
+```{r}
+library(fs)
+library(readr)
+library(ggplot2)
+library(knitr)
+library(dplyr)
+library(caret)
+library(pROC)
+library(glmnet)
+```
+
+We start by importing the data from project 0.
+
+```{r}
+data <- read_csv(path_wd("..", "data", "processed", "odi_bbb_recent.csv"))
+```
+
+This gives the ball-by-ball data for all ODI matches from 2015 on-wards, however, we are trying to predict the outcome of the game based off the first 10 Overs. Hence, we can only train our model on data we would have by the end of the first 10 Overs, such as, what teams are playing, what is the run rate so far, how many wickets have been taken so far etc. This is to prevent data leakage, ie, it would be extremely easy to work out who would have won the game at the end when we have a final score. This kind of problem is similar to how sports betting companies set odds. Therefore, we are not only interested in the outcome of the game but rather how confident we are in that outcome (hence accuracy is not a suitable measure of performance for our models).
+
+To make this a binary classification problem, we consider whether team1 wins or not. This is obviously equivalent to predicting who won the game. First I filter the data so we only consider the first 10 overs of the first innings (\~10% of the game).
+
+```{r}
+first10_overs <- data %>%
+  mutate(over = floor(ball)) %>%
+  filter(innings == 1, over >= 0, over < 10)
+
+#Now summarise the game info we have so far:
+
+#Per Over summary (for feature engineering later)
+
+over_summary <- first10_overs %>%
+  mutate(runs = (coalesce(runs_off_bat, 0) + coalesce(extras, 0))) %>%
+  group_by(match_id, over) %>%
+  summarise(
+    over_runs = sum(runs, na.rm = TRUE),
+    over_boundaries = sum((runs_off_bat %in% c(4,6)), na.rm = TRUE),
+    over_wickets = sum(!is.na(player_dismissed)),
+    over_dotballs = sum((coalesce(runs_off_bat,0) == 0), na.rm = TRUE),
+    balls_in_over = n(),
+    .groups = "drop"
+  )
+
+
+#Summary of the first 10 overs
+
+first10_summary <- first10_overs %>%
+  mutate(runs = (coalesce(runs_off_bat, 0) + coalesce(extras, 0))) %>%
+  group_by(match_id) %>%
+  summarise(
+    batting_team = first(batting_team),
+    bowling_team = first(bowling_team),
+    balls_played = n(),                         
+    overs_played = 10,
+    runs_total = sum(runs, na.rm = TRUE),
+    boundaries = sum((runs_off_bat %in% c(4,6)), na.rm = TRUE),
+    wickets = sum(!is.na(player_dismissed)),
+    dot_balls = sum((coalesce(runs_off_bat,0) == 0), na.rm = TRUE),
+    extras_total = sum(coalesce(extras,0), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    run_rate_per_over = runs_total / pmax(overs_played, 1/6),    # avoid division by zero
+    boundary_rate = boundaries / pmax(balls_played, 1),
+    dot_ball_rate = dot_balls / pmax(balls_played, 1),
+    wickets_rate = wickets / pmax(overs_played, 1/6),
+    avg_runs_per_wicket = runs_total / pmax(wickets, 1)
+  )
+```
+
+Now we do some feature engineering to try and get some numerical measure for 'momentum' in the game.
+
+```{r}
+over_rollups <- over_summary %>%
+  group_by(match_id) %>%
+  summarise(
+    first3_runs = sum(over_runs[over %in% 0:2], na.rm = TRUE),
+    last3_runs  = sum(over_runs[over %in% 7:9], na.rm = TRUE),
+    first3_boundaries = sum(over_boundaries[over %in% 0:2], na.rm = TRUE),
+    last3_boundaries  = sum(over_boundaries[over %in% 7:9], na.rm = TRUE),
+    first3_balls = sum(balls_in_over[over %in% 0:2], na.rm = TRUE),
+    last3_balls = sum(balls_in_over[over %in% 7:9], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    first3_rr = first3_runs / pmax(first3_balls / 6, 1/6),
+    last3_rr  = last3_runs  / pmax(last3_balls / 6, 1/6),
+    acceleration = last3_rr - first3_rr,
+    boundary_momentum = (last3_boundaries / pmax(last3_balls,1)) - (first3_boundaries / pmax(first3_balls,1))
+  )
+```
+
+```{r}
+#Now we take the info we know prior to the match beginning:
+
+match_meta <- data %>%
+  distinct(match_id, team1, team2, winner, toss_winner, toss_decision) %>%
+  group_by(match_id) %>%
+  summarise(
+    team1 = first(team1),
+    team2 = first(team2),
+    winner = first(winner),
+    toss_winner = first(toss_winner),
+    toss_decision = first(toss_decision),
+    .groups = "drop"
+  )
+```
+
+Now combine it to make our model data frame:
+
+```{r}
+model_df <- first10_summary %>%
+  left_join(over_rollups, by = "match_id") %>%
+  left_join(match_meta, by = "match_id")
+
+
+glimpse(model_df)
+```
+
+Clearly we have a lot of columns/ features here and not all of them will have predictive value. Therefore we will have to do some form of feature selection or regularization process (see regularization section). Furthermore, consider the pairs plot of some of this data, we can see they are highly correlated. For example, runs total and run rate contain the same information just scaled and so the model using both is redundant and could possibly lead to over inflated effects of increased runs (ie both run rate and runs increases causing a larger effect than is true). This also violates the assumption we laid out in the introduction.
+
+```{r}
+pairs(model_df[, c("runs_total", "run_rate_per_over", "wickets", 
+                   "wickets_rate", "boundaries", "boundary_rate")])
+
+```
+
+We also have a number of categorical features (including out target feature, who wins), which we want to convert into numerical data points by one-hot encoding.
+
+```{r}
+model_df1 <- model_df %>%
+  filter(!is.na(winner)) %>%
+  mutate(
+    team1_win = ifelse(winner == team1, 1L, 0L),
+    team1_win_toss = as.integer(team1 == toss_winner),
+    batting_team_is_team1 = as.integer(batting_team == team1),
+    toss_decision = as.integer(toss_decision == "field"),
+    batting_team = factor(batting_team),
+    bowling_team = factor(bowling_team),
+    team1 = factor(team1),
+    team2 = factor(team2)
+    
+  )
+
+
+
+
+model_df1 <- model_df1 %>%
+  select(match_id, team1, team2, team1_win,
+         batting_team_is_team1,
+         runs_total, run_rate_per_over, boundaries, boundary_rate,
+         wickets, wickets_rate, dot_balls, dot_ball_rate, extras_total,
+         first3_rr, last3_rr, acceleration, boundary_momentum,
+         team1_win_toss, toss_decision)
+
+```
+
+We now have 20 columns due to all the different teams. This is a very large number considering the number of observations we have, and that we haven't considered all of the dummy variables that will be created by the team factors. Therefore we will need to do some variable selection to reduce collinearity and prevent over-fitting.
+
+```{r}
+dim(model_df1)
+```
+
+Now lets check the balance of our dataset. There is a slight imbalance which favours team1. This is partly due to the implicit "home-advantage" that is captured within this dataset. Although the number of venues made it difficult to capture an exact home/away variable, any team that plays at home is put as team1 in the data set. That does not, however, mean that every team in team1 is playing at home. I attempt to loosely capture the variation from this fact with the variable *batting_team_is_team1*.
+
+```{r}
+model_df1 %>% count(team1_win) %>% print()
+```
+
+# Fitting the Model
+
+When trying to predict the outcome of the match this is obviously equivalent to predicting whether team 1 wins or not. Therefore, this is our target value. However, we will come to see that this initial objective I chose is problematic.
+
+Lets fit an initial logistic model. We are using a 80/20 train test split to evaluate our model.
+
+```{r}
+model_df1$team1_win <- as.numeric(model_df1$team1_win)
+
+# Split into train/test (80/20)
+set.seed(123)
+trainIndex <- createDataPartition(model_df1$team1_win, p = 0.8, list = FALSE)
+train_data <- model_df1[trainIndex, ]
+test_data  <- model_df1[-trainIndex, ]
+
+
+logit_model <- glm(
+  team1_win ~  . - match_id,
+  data = train_data,
+  family = binomial
+)
+
+
+summary(logit_model)
+
+```
+
+Here we can see a few interesting things. The logistic model automatically treats the categorical variables *team1* and *team2* by using one-hot-encoding.. In addition, some of the linearly dependent variables such as acceleration, wickets rate etc have NAs. We need to remove these.
+
+Here we have some redundant because some predictors are perfect linear combinations of the other. For example acceleration,
+
+$$\text{acceleration} = \text{last3_rr}-\text{first3_rr}$$
+
+Hence we will drop all redundant variables.
+
+```{r}
+train_data <- train_data %>%
+  select(-last3_rr, -run_rate_per_over, -wickets_rate)
+
+test_data <- test_data %>%
+  select(-last3_rr, -run_rate_per_over, -wickets_rate)
+```
+
+```{r}
+#Refit the model and evaluate the performance
+
+logit_model <- glm(
+  team1_win ~  . - match_id,
+  data = train_data,
+  family = binomial
+)
+
+# Predict probabilities on test set
+logistic_model_pred <- predict(logit_model, newdata = test_data, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(logistic_model_pred > 0.5, 1, 0)
+
+# ROC curve and AUC
+roc_logistic <- roc(test_data$team1_win, logistic_model_pred)
+
+# Plot ROC curve
+plot(roc_logistic, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_logistic)
+print(paste("AUC =", round(auc_value, 3)))
+```
+
+## Non-linear relationships
+
+This is a surprisingly good AUC considering we have only seen 10% of the game so far. Due to the restrictions we are placing on ourselves it would be impossible to create a 'perfect' predictor with an AUC of 1. However there are some significant issues with our model. Namely, there are clear non-linear relationships which the model is unable to capture.
+
+### Interaction
+
+For example, if team 1 is batting, then wickets are a negative thing and we should have a negative coefficient. However, if they are bowling it is a positive. There are similar problems for all game stats such as boundaries, runs etc. This is reflected by the low significance the model places on each predictor numeric predictor. It essentially just predicting game results off how good each team generally is:
+
+```{r}
+summary(logit_model)
+```
+
+Although some weight is given to wickets, the majority of the predictive power is based purely based off what team is playing. However, we can improve this by 'teaching' the model the relationship, via interactions:
+
+```{r}
+interaction_model <- glm(
+  team1_win ~ batting_team_is_team1 * (wickets + dot_ball_rate + runs_total + acceleration + boundary_momentum + boundary_rate + first3_rr +boundaries) + . - match_id,
+  data = train_data,
+  family = binomial
+)
+
+
+summary(interaction_model)
+```
+
+Consider the terms *wickets* and *batting_team_is_team1:wickets*. These are both now very significant predictors. Lets investigate how this relationship actually works in practice.
+
+If team1 is bowling then the variable *batting_team_is_team1* is 0 and there are no contributions from it or its interaction terms. Hence, for every wicket taken, provided all else remains constant, then the log-odds increases by 0.7868. So the likelihood of team1 winning increases.
+
+If team1 is batting however, then for every wicket the log-odds change by (0.7868 - 1.323) = -0.5362 and so overall the likelihood of team1 decreases. This clearly means it has captured the relationship we want however there is a better way to capture this.
+
+```{r}
+# Predict probabilities on test set
+interaction_model_pred <- predict(interaction_model, newdata = test_data, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(interaction_model_pred > 0.5, 1, 0)
+
+# ROC curve and AUC
+roc_interaction <- roc(test_data$team1_win, interaction_model_pred)
+
+# Plot ROC curve
+plot(roc_interaction, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_interaction)
+print(paste("AUC =", round(auc_value, 3)))
+```
+
+### Re-framing the Problem
+
+Rather than predicting for whether team 1 wins, we can simply predict whether the batting team wins and then look up who the batting team were. This is an equivalent problem but removes the obvious non-linear relationships (this of course does not mean the true relationship is linear, rather that we have removed a relationship that is definitely not). To demonstrate why this works, consider the *wickets* predictor again.
+
+Now, every time a wicket is taken, the likelihood of the batting team winning decreases. For every run scored the likelihood increases (although we don't know if these changes are truly linear).
+
+```{r}
+model_df2 <- model_df %>%
+  filter(!is.na(winner)) %>%
+  mutate(
+    batting_team_win = ifelse(winner == batting_team, 1L, 0L),
+    batting_team_win_toss = as.integer(batting_team == toss_winner),
+    batting_team_is_team1 = as.integer(batting_team == team1),
+    batting_team = factor(batting_team),
+    bowling_team = factor(bowling_team),
+    team1 = factor(team1),
+    team2 = factor(team2)
+    
+  )
+
+
+
+
+model_df2 <- model_df2 %>%
+  select(match_id, batting_team, bowling_team, batting_team_win,
+         runs_total, boundaries, boundary_rate,
+         wickets, dot_balls, dot_ball_rate, extras_total,
+         first3_rr, acceleration, boundary_momentum,
+         batting_team_win_toss, batting_team_is_team1)
+```
+
+```{r}
+model_df2$batting_team_win <- as.numeric(model_df2$batting_team_win)
+
+# Split into train/test (80/20)
+set.seed(123)
+trainIndex <- createDataPartition(model_df2$batting_team_win, p = 0.8, list = FALSE)
+train_data2 <- model_df2[trainIndex, ]
+test_data2  <- model_df2[-trainIndex, ]
+
+# Fit logistic regression model
+# Single logistic regression with interactions
+logit_model2 <- glm(
+  batting_team_win ~  . - match_id,
+  data = train_data2,
+  family = binomial
+)
+
+
+summary(logit_model2)
+```
+
+As expected, wickets are now always negative.
+
+```{r}
+# Predict probabilities on test set
+logistic_model2_pred <- predict(logit_model2, newdata = test_data2, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(logistic_model2_pred > 0.5, 1, 0)
+
+
+# ROC curve and AUC
+roc_logistic2 <- roc(test_data2$batting_team_win, logistic_model2_pred)
+
+# Plot ROC curve
+plot(roc_logistic2, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_logistic2)
+print(paste("AUC =", round(auc_value, 3)))
+```
+
+This change also increases our AUC and so by our measurement it is a better model than the interaction model.
+
+## Regularization
+
+However, we aren't finished. As we have seen from above there are many predictors considered in our model which have a large p-value. This is bad as it may lead to over-fitting in our model, this means the model fits the training data too closely and performs poorly on new data. To address this issue we introduce regularization, which adds a penalty to large coefficient values, encouraging the model to only retain the most important predictors and shrink or remove the less useful ones:
+
+From [3]:
+
+$$
+\hat{\boldsymbol{\beta}} 
+= \arg\min_{\boldsymbol{\beta}} 
+\left\{
+- \sum_{i=1}^{n} 
+\left[ 
+y_i \log p_i + (1 - y_i)\log(1 - p_i)
+\right]
++ \lambda \left[ 
+(1 - \alpha)\frac{1}{2}\|\boldsymbol{\beta}\|_2^2 
++ \alpha \|\boldsymbol{\beta}\|_1
+\right]
+\right\},
+$$ where $\quad p_i = \frac{1}{1 + e^{-\mathbf{x}_i^\top \boldsymbol{\beta}}}$.
+
+Within our framework we can choose $\lambda$ (the penalty term) and $\alpha$, which determines the kind of regularization:
+
+$$
+\begin{aligned}
+\alpha = 0 &:\ \text{(Ridge regression) applies an } L_2 \text{ penalty. It shrinks coefficients towards zero but rarely makes them exactly zero,}\\
+&\quad \text{which helps when many predictors have small effects.} \\[8pt]
+\alpha = 1 &:\ \text{(LASSO regression) applies an } L_1 \text{ penalty. It can set some coefficients exactly to zero,}\\
+&\quad \text{performing automatic variable selection.} \\[8pt]
+0 < \alpha < 1 &:\ \text{(Elastic Net) combines both penalties, balancing between Ridge’s stability and LASSO’s sparsity.}\\
+&\quad \text{This is especially useful when predictors are correlated.}
+\end{aligned}
+$$
+
+### Scenario Analysis
+
+I will now perform a brief scenario analysis to demonstrate why this is necessary. From our EDA, we found that no one in the last 10 years has won a game after losing 5 wickets or more in the first 10 overs. Therefore, regardless of which two countries are playing each other, if one of them loses say 8 wickets, then the likelihood of them winning the match should be near 0.
+
+```{r}
+# Start with all columns = 0
+scenario <- as.data.frame(matrix(0, nrow = 1, ncol = ncol(train_data2)))
+colnames(scenario) <- colnames(train_data2)
+
+# Set categorical indicators
+scenario$batting_team <- factor("Australia", levels = levels(train_data2$batting_team))
+scenario$bowling_team <- factor("Canada", levels = levels(train_data2$bowling_team))
+
+# Set contextual features
+scenario$runs_total <- 40         # runs after 10 overs
+scenario$boundaries <- 8
+scenario$boundary_rate <- 0.8
+scenario$wickets <- 7     
+scenario$dot_balls <- 30
+scenario$dot_ball_rate <- 0.3
+scenario$extras_total <- 2
+scenario$first3_rr <- 5.5
+scenario$acceleration <- 0.1
+scenario$boundary_momentum <- -0.2
+scenario$batting_team_win_toss <- 1
+
+
+x_scenario2 <- model.matrix(batting_team_win ~ . - match_id, data = scenario)[, -1]
+```
+
+Here we have Australia, one of the strongest teams, playing Canada, one of the weakest, with Australia batting. In this scenario, Australia has lost 8 wickets in the first 10 overs with all other stats reasonable. Any expert seeing this scenario would tell you that the probability of Australia winning in this scenario is near 0. Lets see what our model predicts.
+
+```{r}
+prob_win <- predict(logit_model2, newdata = scenario, type = "response")
+prob_win
+
+```
+
+Despite, losing 8 wickets our model still predicts Australia to win with almost 100% certainty. This is because our model is massively over-fitted to our data set and uses the team based factors to do most of the predicting.
+
+## Cross-Validation
+
+Now we have shown why our model needs regularization we need a method to select both $\lambda$ and $\alpha$. Our formula will be as follows:
+
+1.  Choose grids for $\lambda$ and $\alpha$ to search over.
+
+2.  Split training data into K folds.
+
+3.  For each $\alpha_i$ in the grid perform cross-validation to find the the optimal $\hat{\lambda}_i$ which maximises the AUC.
+
+4.  Set $L_i$ to the value for the largest AUC achieved with $\alpha=\alpha_i$.
+
+5.  Then select $\hat{\alpha}$ to be the $\alpha_i$ with AUC value, and set $\hat{\lambda} = \hat{\lambda}_i$
+
+6.  Fit the model with $(\hat{\alpha},\hat{\lambda})$
+
+```{r}
+
+# Prepare data - for GLM net we need matrices
+x_train2 <- model.matrix(batting_team_win ~ . - match_id, data = train_data2)[, -1]  # remove intercept
+y_train2 <- train_data2$batting_team_win
+
+x_test2 <- model.matrix(batting_team_win ~ . - match_id, data = test_data2)[, -1]  # remove intercept
+y_test2 <- test_data2$batting_team_win
+
+# Grid of alpha values to try
+alpha_grid <- seq(0, 1, by = 0.05)  # from Ridge (0) to LASSO (1)
+lambda_seq <- 10^seq(-6, 2, length = 200) #Sometime you need to check optimal lambda is in this sequence (I have done separately)
+
+# Store CV results
+cv_results <- list()
+cv_auc <- numeric(length(alpha_grid))
+
+set.seed(123)
+for (i in seq_along(alpha_grid)) {
+  cv <- cv.glmnet(
+    x_train2, y_train2,
+    alpha = alpha_grid[i],
+    lambda = lambda_seq,
+    family = "binomial",
+    type.measure = "auc",
+    nfolds = 10
+  )
+  cv_results[[i]] <- cv
+  cv_auc[i] <- max(cv$cvm)  # best AUC for this alpha
+}
+
+# Find alpha with best CV AUC
+best_alpha <- alpha_grid[which.max(cv_auc)]
+best_lambda <- cv_results[[which.max(cv_auc)]]$lambda.min
+
+cat("Best alpha:", best_alpha, "\n")
+cat("Best lambda:", best_lambda, "\n")
+
+# Refit final elastic net model on full training set
+final_model <- glmnet(
+  x_train2, y_train2,
+  alpha = best_alpha,
+  lambda = best_lambda,
+  family = "binomial"
+)
+
+# Predict probabilities on test set
+final_model_pred <- predict(final_model, newx = x_test2, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(final_model_pred > 0.5, 1, 0)
+
+
+# ROC curve and AUC
+roc_final <- roc(y_test2, final_model_pred)
+
+# Plot ROC curve
+plot(roc_final, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_final)
+print(paste("AUC =", round(auc_value, 3)))
+
+```
+
+Again we have improved the AUC, so by our measure we have an improved model.
+
+### Scenario Analysis II
+
+```{r}
+prob_win <- predict(final_model, newx = x_scenario2, type = "response")
+prob_win
+```
+
+This is probably still to high however it is much improved compared to our prior model, as it now predicts Australia to lose the game. Therefore regularization has helped to reduce the level of over-fitting within the model.
+
+# Overview
+
+In this document we have applied Logistic Regression to model our dataset, with the goal of predicting the outcome of an ODI cricket match. We obtained an AUC of 0.76 which does not seem possible to improve further with this model. Whilst this may at first seem generally poor for a model, given the context that we are predicting when only 10% of the game has been played this seems respectable. We attempted multiple methods, including cross validation for hyperparameter tuning, regularizartion as well as considering interaction to model non-linear relationships. However, improvements were only slight in terms of AUC. However the main improvement can be seen through our scenario analysis of our model. It reduced the over reliance of the model on the categoric features such as the teams that were playing and instead increased the importance of features such as wickets taken.
+
+```{r}
+par(mfrow = c(1, 3))  # 3-panel layout
+
+for (xmax in c(1, 0.05, 0.005)) {
+  
+  # Base plot: logistic model
+  plot(1 - roc_logistic$specificities, roc_logistic$sensitivities, type = "l",
+       xlab = "False Positive Rate", ylab = "True Positive Rate",
+       xlim = c(0, xmax), ylim = c(0, 1),
+       col = 2, lwd = 2, main = ifelse(xmax == 1, "ROC Curves (Zoomed Views)", ""))
+  
+  # Add the other ROC curves
+  lines(1 - roc_interaction$specificities, roc_interaction$sensitivities, col = 3, lwd = 2, lty = 2)
+  lines(1 - roc_logistic2$specificities, roc_logistic2$sensitivities, col = 4, lwd = 2, lty = 3)
+  lines(1 - roc_final$specificities, roc_final$sensitivities, col = 6, lwd = 3, lty = 1)
+  
+  # Add diagonal line
+  abline(a = 0, b = 1, lty = 3, col = "grey")
+  
+  # Add legend only to the first panel
+  if (xmax == 1) {
+    legend("bottomright",
+           legend = c("Logistic Model", "Interaction Model", "Re-framed Model", "Final Model"),
+           col = c(2, 3, 4, 6),
+           lty = c(1, 2, 3, 1),
+           lwd = c(2, 2, 2, 3),
+           text.col = c(2, 3, 4, 6),
+           bty = "n", cex = 0.8)
+  }
+}
+
+
+```
+
+The final model does not dominate the other models however it does generally perform as well if not better, based off the ROC plots.
+
+# Limitations
+
+One of the clear limitations of using a logistic regression model for this problem is that it assumes a linear relationship between the features and the log odds. This assumption may not appear in the data set and could cause lower performance. We can attempt to force it to model non-linear relationships by using interactions and polynomials, but attempting to find the true model in such a way would be extremely difficult. Furthermore, there is clearly collinearities between our features when the model assumes there is not. For example, as the number of boundaries increases, this clearly has an effect on the number of runs also. The inclusion of regularization helps to manage this, but it is still not ideal.
+
+However, despite all this we are limited by the amount of data we have. despite the 100,000s of rows of ball-by-ball data we have, this only equates to \~1000 games. When trying to answer a match level prediction question, this suddenly becomes not that much data. In fact it may not be enough data for more complex non-linear methods to work effectively.
+
+# Conclusion
+
+We conclude that logistic regression is clearly not a perfect modal for this prediction question. Whilst it was able to attain an AUC of 0.761, this is not a high enough level of confidence to be using the outputs to then set betting odds etc. We have discussed a number of ways in which the data does not meet the assumptions needed for the model to perform well, and that other models may be best suited.
+
+However, due to the relatively small data set it may still out perform more complex models.
+
+## References
+
+[1] <https://www.geeksforgeeks.org/machine-learning/understanding-logistic-regression/>
+
+[2] James, G., Witten, D., Hastie, T., & Tibshirani, R. (2021). An Introduction to Statistical Learning, 2nd Edition. Springer. (Ch. 4: Classification)
+
+[3] Zou, H., & Hastie, T. (2005). Regularization and variable selection via the elastic net. *Journal of the Royal Statistical Society: Series B (Statistical Methodology)*, 67(2), 301–320.
+
+[4] Hastie, Tibshirani & Friedman (2009) *The Elements of Statistical Learning*, Ch. 2 & 7 (bias–variance trade-off, classification models).

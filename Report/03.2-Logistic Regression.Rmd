@@ -1,0 +1,281 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-10-30"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Predicting off the first Innings
+
+In this section we simply apply what we have learnt in section .1 to a data set which contains the entirety of the first innings and the first 10 overs of the second innings. As the model is now predicting off ~60% of the game being played we hope to see a significant increase in AUC. This would indicate that the model is predicting off the match data and not just the meta data (ie the teams that are playing).
+
+## Data setup
+
+Following a very similar process as to section 1, we set up the data to include all the results from the first innings and the first 10 overs of the second innings.
+
+```{r}
+# ----------------------------
+# Load packages
+# ----------------------------
+library(dplyr)
+library(readr)
+library(glmnet)
+library(caret)
+library(pROC)
+
+```
+
+```{r}
+
+data <- read_csv("../data/processed/odi_bbb_recent.csv")  
+
+```
+
+
+```{r}
+#First innings summary
+first_innings <- data %>%
+  mutate(over = floor(ball)) %>%
+  filter(innings == 1) %>%
+  mutate(runs = coalesce(runs_off_bat,0) + coalesce(extras,0)) %>%
+  group_by(match_id) %>%
+  summarise(
+    batting_team_1st = first(batting_team),
+    bowling_team_1st = first(bowling_team),
+    balls_played_1st = n(),
+    overs_played_1st = max(over) + 1,
+    runs_total_1st = sum(runs, na.rm = TRUE),
+    boundaries_1st = sum(runs_off_bat %in% c(4,6), na.rm = TRUE),
+    wickets_1st = sum(!is.na(player_dismissed)),
+    dot_balls_1st = sum(runs_off_bat == 0, na.rm = TRUE),
+    extras_total_1st = sum(coalesce(extras,0), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    run_rate_1st = runs_total_1st / pmax(overs_played_1st, 1/6),
+    boundary_rate_1st = boundaries_1st / pmax(balls_played_1st,1),
+    dot_ball_rate_1st = dot_balls_1st / pmax(balls_played_1st,1),
+    wickets_rate_1st = wickets_1st / pmax(overs_played_1st, 1/6)
+  )
+
+
+# First 10 overs of second innings
+
+second10_overs <- data %>%
+  mutate(over = floor(ball)) %>%
+  filter(innings == 2, over < 10) %>%
+  mutate(runs = coalesce(runs_off_bat,0) + coalesce(extras,0))
+
+second10_summary <- second10_overs %>%
+  group_by(match_id) %>%
+  summarise(
+    batting_team = first(batting_team),
+    runs_total_2nd10 = sum(runs, na.rm = TRUE),
+    boundaries_2nd10 = sum(runs_off_bat %in% c(4,6), na.rm = TRUE),
+    wickets_2nd10 = sum(!is.na(player_dismissed)),
+    dot_balls_2nd10 = sum(runs_off_bat == 0, na.rm = TRUE),
+    balls_played_2nd10 = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    run_rate_2nd10 = runs_total_2nd10 / pmax(balls_played_2nd10 / 6, 1/6),
+    boundary_rate_2nd10 = boundaries_2nd10 / pmax(balls_played_2nd10,1),
+    dot_ball_rate_2nd10 = dot_balls_2nd10 / pmax(balls_played_2nd10,1),
+    wickets_rate_2nd10 = wickets_2nd10 / pmax(balls_played_2nd10 / 6, 1/6)
+  )
+
+
+# Momentum features from second innings first 10 overs
+
+over_summary <- second10_overs %>%
+  mutate(over = floor(ball), runs = coalesce(runs_off_bat,0) + coalesce(extras,0)) %>%
+  group_by(match_id, over) %>%
+  summarise(
+    over_runs = sum(runs, na.rm = TRUE),
+    over_boundaries = sum(runs_off_bat %in% c(4,6), na.rm = TRUE),
+    balls_in_over = n(),
+    .groups = "drop"
+  )
+
+over_rollups <- over_summary %>%
+  group_by(match_id) %>%
+  summarise(
+    first3_runs = sum(over_runs[over %in% 0:2], na.rm = TRUE),
+    last3_runs  = sum(over_runs[over %in% 7:9], na.rm = TRUE),
+    first3_boundaries = sum(over_boundaries[over %in% 0:2], na.rm = TRUE),
+    last3_boundaries  = sum(over_boundaries[over %in% 7:9], na.rm = TRUE),
+    first3_balls = sum(balls_in_over[over %in% 0:2], na.rm = TRUE),
+    last3_balls = sum(balls_in_over[over %in% 7:9], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    first3_rr = first3_runs / pmax(first3_balls / 6, 1/6),
+    last3_rr  = last3_runs  / pmax(last3_balls / 6, 1/6),
+    acceleration = last3_rr - first3_rr,
+    boundary_momentum = (last3_boundaries / pmax(last3_balls,1)) - (first3_boundaries / pmax(first3_balls,1))
+  )
+
+#Meta data
+match_meta <- data %>%
+  distinct(match_id, team1, team2, winner, toss_winner, toss_decision) %>%
+  group_by(match_id) %>%
+  summarise(
+    team1 = first(team1),
+    team2 = first(team2),
+    winner = first(winner),
+    toss_winner = first(toss_winner),
+    toss_decision = first(toss_decision),
+    .groups = "drop"
+  )
+
+#Combine into a model
+model_df <- first_innings %>%
+  left_join(second10_summary, by = "match_id") %>%
+  left_join(over_rollups, by = "match_id") %>%
+  left_join(match_meta, by = "match_id")
+
+#Final data set
+model_df2 <- model_df %>%
+  filter(!is.na(winner)) %>%
+  mutate(
+    # Target: whether batting team in 2nd innings wins
+    batting_team_win = ifelse(winner == batting_team, 1L, 0L),
+    batting_team_win_toss = as.integer(batting_team == toss_winner),
+    batting_team_is_team1 = as.integer(batting_team == team1),
+    batting_team = factor(batting_team),
+    bowling_team = factor(if_else(batting_team == team1, team2, team1)),
+    team1 = factor(team1),
+    team2 = factor(team2)
+  ) %>%
+  select(
+    match_id, batting_team, bowling_team, batting_team_win,
+    runs_total_1st, boundaries_1st, boundary_rate_1st, wickets_1st, dot_balls_1st, dot_ball_rate_1st, extras_total_1st,
+    runs_total_2nd10, boundaries_2nd10, boundary_rate_2nd10, wickets_2nd10, dot_balls_2nd10, dot_ball_rate_2nd10,
+    first3_rr, acceleration, boundary_momentum,
+    batting_team_win_toss
+  )
+
+glimpse(model_df2) #To check it is set up correctly
+
+```
+
+## Fit the model
+
+We have set up the model in a similar way to our logistic model in section 1. That is we are predicting whether the batting team in the second innings wins the game or not. This solves the annoying non-linear relationship problems we had previously.
+
+```{r}
+model_df2$batting_team_win <- as.numeric(model_df2$batting_team_win)
+
+# Split into train/test (80/20)
+set.seed(123)
+trainIndex <- createDataPartition(model_df2$batting_team_win, p = 0.8, list = FALSE)
+train_data2 <- model_df2[trainIndex, ]
+test_data2  <- model_df2[-trainIndex, ]
+
+# Fit logistic regression model
+# Single logistic regression with interactions
+logit_model2 <- glm(
+  batting_team_win ~  . - match_id,
+  data = train_data2,
+  family = binomial
+)
+
+
+summary(logit_model2)
+```
+The summary tells us some interesting things. Wickets in the second over are again a negative thing (decrease log odds) for our batting team, which is good. However, wickets in the first effect, whilst positive which is good, are a much smaller effect. This is likely because it is more important to know the number of runs that were scored in the first innings and if the run rate is high enough to reach it. Again we have a number of predictors with low significance which suggests that regularisation would again be a good idea. First, however, lets see if the model has a higher AUC already.
+
+
+```{r}
+# Predict probabilities on test set
+logistic_model2_pred <- predict(logit_model2, newdata = test_data2, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(logistic_model2_pred > 0.5, 1, 0)
+
+
+# ROC curve and AUC
+roc_logistic2 <- roc(test_data2$batting_team_win, logistic_model2_pred)
+
+# Plot ROC curve
+plot(roc_logistic2, col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_logistic2)
+print(paste("AUC =", round(auc_value, 3)))
+```
+Good, we have already seen a significant increase in AUC, indicating that our model is better at discriminating between the two outcomes. Now, lets see if regularisation improves our model performance further.
+
+
+```{r}
+
+
+# Prepare data - for GLM net we need matrices
+x_train2 <- model.matrix(batting_team_win ~ . - match_id, data = train_data2)[, -1]  # remove intercept
+y_train2 <- train_data2$batting_team_win
+
+x_test2 <- model.matrix(batting_team_win ~ . - match_id, data = test_data2)[, -1]  # remove intercept
+y_test2 <- test_data2$batting_team_win
+
+# Grid of alpha values to try
+alpha_grid <- seq(0, 1, by = 0.05)  # from Ridge (0) to LASSO (1)
+lambda_seq <- 10^seq(-6, 2, length = 200) #Sometime you need to check optimal lambda is in this sequence (I have done separately)
+
+# Store CV results
+cv_results <- list()
+cv_auc <- numeric(length(alpha_grid))
+
+set.seed(123)
+for (i in seq_along(alpha_grid)) {
+  cv <- cv.glmnet(
+    x_train2, y_train2,
+    alpha = alpha_grid[i],
+    lambda = lambda_seq,
+    family = "binomial",
+    type.measure = "auc",
+    nfolds = 10
+  )
+  cv_results[[i]] <- cv
+  cv_auc[i] <- max(cv$cvm)  # best AUC for this alpha
+}
+
+# Find alpha with best CV AUC
+best_alpha <- alpha_grid[which.max(cv_auc)]
+best_lambda <- cv_results[[which.max(cv_auc)]]$lambda.min
+
+cat("Best alpha:", best_alpha, "\n")
+cat("Best lambda:", best_lambda, "\n")
+
+# Refit final elastic net model on full training set
+final_model <- glmnet(
+  x_train2, y_train2,
+  alpha = best_alpha,
+  lambda = best_lambda,
+  family = "binomial"
+)
+
+# Predict probabilities on test set
+final_model_pred <- predict(final_model, newx = x_test2, type = "response")
+
+# Convert to class predictions (threshold = 0.5)
+pred_classes <- ifelse(final_model_pred > 0.5, 1, 0)
+
+
+# ROC curve and AUC
+roc_final <- roc(y_test2, final_model_pred)
+
+# Plot ROC curve
+plot(roc_final, xlim=c(1,0),col = "blue", lwd = 2, main = "ROC Curve - Logistic Regression")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# AUC value
+auc_value <- auc(roc_final)
+print(paste("AUC =", round(auc_value, 3)))
+
+```
+
+Again our AUC has improved. An AUC of over 0.9 shows that at this point in the game the model is very confident in predicting the outcome of the game. This would make it a much more usable model in the real world especially as it is so fast to run.
