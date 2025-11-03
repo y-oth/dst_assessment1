@@ -186,6 +186,8 @@ logit_model2 <- glm(
 
 summary(logit_model2)
 ```
+
+
 The summary tells us some interesting things. Wickets in the second over are again a negative thing (decrease log odds) for our batting team, which is good. However, wickets in the first effect, whilst positive which is good, are a much smaller effect. This is likely because it is more important to know the number of runs that were scored in the first innings and if the run rate is high enough to reach it. Again we have a number of predictors with low significance which suggests that regularisation would again be a good idea. First, however, lets see if the model has a higher AUC already.
 
 
