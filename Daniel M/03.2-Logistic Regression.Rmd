@@ -278,6 +278,13 @@ abline(a = 0, b = 1, lty = 2, col = "gray")
 auc_value <- auc(roc_final)
 print(paste("AUC =", round(auc_value, 3)))
 
+roc_df <- data.frame(
+  fpr = 1 - roc_final$specificities,
+  tpr = roc_final$sensitivities
+)
+
+write_csv(roc_df, "roc_logistic.csv")
+
 ```
 
 Again our AUC has improved. An AUC of over 0.9 shows that at this point in the game the model is very confident in predicting the outcome of the game. This would make it a much more usable model in the real world especially as it is so fast to run.
