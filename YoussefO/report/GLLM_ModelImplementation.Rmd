@@ -20,7 +20,7 @@ for (p in pkgs) {
 }
 ```
 
----
+
 
 
 
@@ -49,7 +49,6 @@ data2$venue <- as.factor(data2$venue)
 data2$winner_binary <- as.factor(data2$winner_binary)
 ```
 
----
 We split both datasets using the normal test-train split:
 ```{r}
 #Test-Train Split:
@@ -132,29 +131,32 @@ fixed_effects <- "runs_difference + wickets_difference + team1_dot_ball_percenta
 # ============================================================
 
 # Option 1: Random intercepts for team1 and team2
-formula1 <- as.formula(paste("winner_binary ~", fixed_effects, "+ (1 | team1)
-                             + (1 | team2)"))
+formula1 <- as.formula(paste(c("winner_binary ~", fixed_effects, "+ (1 | team1)",
+                             "+ (1 | team2)"),
+                       collapse = " "))
 
 # Option 2: Add season as random intercept
-formula2 <- as.formula(paste("winner_binary ~", fixed_effects, "+ (1 | season) 
-                             + (1 | team1) + (1 | team2)"))
+formula2 <- as.formula(paste(c("winner_binary ~", fixed_effects, "+ (1 | season)",
+                               "+ (1 | team1)", "+ (1 | team2)"),
+                             collapse = " "))
 
 # Option 3: Add venue as another grouping factor
-formula3 <- as.formula(paste("winner_binary ~", fixed_effects, "+ (1 | season)
-                             + (1 | venue) + (1 | team1) + (1 | team2)"))
+formula3 <- as.formula(paste(c("winner_binary ~", fixed_effects, "+ (1 | season)",
+                             "+ (1 | venue)", "+ (1 | team1)", "+ (1 | team2)"),
+                             collapse = " "))
 
 # Option 3.1: Add random slope for run_rate_difference by team 
-formula3.1 <- as.formula(paste("winner_binary ~", fixed_effects, 
-                               "+ (1 + run_rate_difference | team1) +
-                               (1 + run_rate_difference | team2) + 
-                               (1 | season) + (1 | venue)"))
+formula3.1 <- as.formula(paste(c("winner_binary ~", fixed_effects, 
+                               "+ (1 + run_rate_difference | team1)", 
+                               "+(1 + run_rate_difference | team2)", 
+                               "+ (1 | season)", "+ (1 | venue)"),
+                         collapse = " "))
 
 # Option 4: No random effects (pure GLM baseline)
 formula4 <- as.formula(paste("winner_binary ~", fixed_effects))
 ```
 
 
----
 
 ## Fitting the models:
 
