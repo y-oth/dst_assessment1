@@ -357,7 +357,7 @@ display: none;
 
 <div id="predicting-off-the-first-innings" class="section level1">
 <h1>Predicting off the first Innings</h1>
-<p>In this section we simply apply what we have learnt in section .1 to
+<p>In this section we simply apply what we have learnt in section 3.1 to
 a data set which contains the entirety of the first innings and the
 first 10 overs of the second innings. As the model is now predicting off
 ~60% of the game being played we hope to see a significant increase in
@@ -565,7 +565,7 @@ glimpse(model_df2) #To check it is set up correctly</code></pre>
 <div id="fit-the-model" class="section level2">
 <h2>Fit the model</h2>
 <p>We have set up the model in a similar way to our logistic model in
-section 1. That is we are predicting whether the batting team in the
+section 3.1. That is we are predicting whether the batting team in the
 second innings wins the game or not. This solves the annoying non-linear
 relationship problems we had previously.</p>
 <pre class="r"><code>model_df2$batting_team_win &lt;- as.numeric(model_df2$batting_team_win)
@@ -670,7 +670,7 @@ positive which is good, are a much smaller effect. This is likely
 because it is more important to know the number of runs that were scored
 in the first innings and if the run rate is high enough to reach it.
 Again we have a number of predictors with low significance which
-suggests that regularisation would again be a good idea. First, however,
+suggests that regularization would again be a good idea. First, however,
 lets see if the model has a higher AUC already.</p>
 <pre class="r"><code># Predict probabilities on test set
 logistic_model2_pred &lt;- predict(logit_model2, newdata = test_data2, type = &quot;response&quot;)
@@ -693,7 +693,7 @@ print(paste(&quot;AUC =&quot;, round(auc_value, 3)))</code></pre>
 <pre><code>## [1] &quot;AUC = 0.887&quot;</code></pre>
 <p>Good, we have already seen a significant increase in AUC, indicating
 that our model is better at discriminating between the two outcomes.
-Now, lets see if regularisation improves our model performance
+Now, lets see if regularization improves our model performance
 further.</p>
 <pre class="r"><code># Prepare data - for GLM net we need matrices
 x_train2 &lt;- model.matrix(batting_team_win ~ . - match_id, data = train_data2)[, -1]  # remove intercept
@@ -761,10 +761,16 @@ abline(a = 0, b = 1, lty = 2, col = &quot;gray&quot;)</code></pre>
 auc_value &lt;- auc(roc_final)
 print(paste(&quot;AUC =&quot;, round(auc_value, 3)))</code></pre>
 <pre><code>## [1] &quot;AUC = 0.909&quot;</code></pre>
+<pre class="r"><code>accuracy &lt;- mean(y_test2 == pred_classes)
+print(paste(&quot;Accuracy =&quot;, round(accuracy, 3)))</code></pre>
+<pre><code>## [1] &quot;Accuracy = 0.831&quot;</code></pre>
 <p>Again our AUC has improved. An AUC of over 0.9 shows that at this
 point in the game the model is very confident in predicting the outcome
 of the game. This would make it a much more usable model in the real
-world especially as it is so fast to run.</p>
+world especially as it is so fast to run. In particular with a threshold
+set at 0.5, it achieves an accuracy of 0.831, so it correctly predicts
+the outcome of 83.1%. It is likely we could improve this by optimising
+the threshold.</p>
 </div>
 </div>
 

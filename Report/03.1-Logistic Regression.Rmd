@@ -59,7 +59,7 @@ data <- read_csv(path_wd("..", "data", "processed", "odi_bbb_recent.csv"))
 
 This gives the ball-by-ball data for all ODI matches from 2015 on-wards, however, we are trying to predict the outcome of the game based off the first 10 Overs. Hence, we can only train our model on data we would have by the end of the first 10 Overs, such as, what teams are playing, what is the run rate so far, how many wickets have been taken so far etc. This is to prevent data leakage, ie, it would be extremely easy to work out who would have won the game at the end when we have a final score. This kind of problem is similar to how sports betting companies set odds. Therefore, we are not only interested in the outcome of the game but rather how confident we are in that outcome (hence accuracy is not a suitable measure of performance for our models).
 
-To make this a binary classification problem, we consider whether team1 wins or not. This is obviously equivalent to predicting who won the game. First I filter the data so we only consider the first 10 overs of the first innings (\~10% of the game).
+To make this a binary classification problem, we consider whether team1 wins or not. This is obviously equivalent to predicting who won the game. First we filter the data so we only consider the first 10 overs of the first innings (\~10% of the game).
 
 ```{r}
 first10_overs <- data %>%
@@ -569,7 +569,7 @@ prob_win <- predict(final_model, newx = x_scenario2, type = "response")
 prob_win
 ```
 
-This is probably still to high however it is much improved compared to our prior model, as it now predicts Australia to lose the game. Therefore regularization has helped to reduce the level of over-fitting within the model.
+This is probably still too high however it is much improved compared to our prior model, as it now predicts Australia to lose the game. Therefore regularization has helped to reduce the level of over-fitting within the model.
 
 # Overview
 
