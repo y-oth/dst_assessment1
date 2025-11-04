@@ -470,8 +470,8 @@ of the game but rather how confident we are in that outcome (hence
 accuracy is not a suitable measure of performance for our models).</p>
 <p>To make this a binary classification problem, we consider whether
 team1 wins or not. This is obviously equivalent to predicting who won
-the game. First I filter the data so we only consider the first 10 overs
-of the first innings (~10% of the game).</p>
+the game. First we filter the data so we only consider the first 10
+overs of the first innings (~10% of the game).</p>
 <pre class="r"><code>first10_overs &lt;- data %&gt;%
   mutate(over = floor(ball)) %&gt;%
   filter(innings == 1, over &gt;= 0, over &lt; 10)
@@ -1404,7 +1404,7 @@ model.</p>
 prob_win</code></pre>
 <pre><code>##              s0
 ## [1,] 0.06290975</code></pre>
-<p>This is probably still to high however it is much improved compared
+<p>This is probably still too high however it is much improved compared
 to our prior model, as it now predicts Australia to lose the game.
 Therefore regularization has helped to reduce the level of over-fitting
 within the model.</p>

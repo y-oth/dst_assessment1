@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 # Predicting off the first Innings
 
-In this section we simply apply what we have learnt in section .1 to a data set which contains the entirety of the first innings and the first 10 overs of the second innings. As the model is now predicting off ~60% of the game being played we hope to see a significant increase in AUC. This would indicate that the model is predicting off the match data and not just the meta data (ie the teams that are playing).
+In this section we simply apply what we have learnt in section 3.1 to a data set which contains the entirety of the first innings and the first 10 overs of the second innings. As the model is now predicting off ~60% of the game being played we hope to see a significant increase in AUC. This would indicate that the model is predicting off the match data and not just the meta data (ie the teams that are playing).
 
 ## Data setup
 
@@ -164,7 +164,7 @@ glimpse(model_df2) #To check it is set up correctly
 
 ## Fit the model
 
-We have set up the model in a similar way to our logistic model in section 1. That is we are predicting whether the batting team in the second innings wins the game or not. This solves the annoying non-linear relationship problems we had previously.
+We have set up the model in a similar way to our logistic model in section 3.1. That is we are predicting whether the batting team in the second innings wins the game or not. This solves the annoying non-linear relationship problems we had previously.
 
 ```{r}
 model_df2$batting_team_win <- as.numeric(model_df2$batting_team_win)
@@ -186,7 +186,7 @@ logit_model2 <- glm(
 
 summary(logit_model2)
 ```
-The summary tells us some interesting things. Wickets in the second over are again a negative thing (decrease log odds) for our batting team, which is good. However, wickets in the first effect, whilst positive which is good, are a much smaller effect. This is likely because it is more important to know the number of runs that were scored in the first innings and if the run rate is high enough to reach it. Again we have a number of predictors with low significance which suggests that regularisation would again be a good idea. First, however, lets see if the model has a higher AUC already.
+The summary tells us some interesting things. Wickets in the second over are again a negative thing (decrease log odds) for our batting team, which is good. However, wickets in the first effect, whilst positive which is good, are a much smaller effect. This is likely because it is more important to know the number of runs that were scored in the first innings and if the run rate is high enough to reach it. Again we have a number of predictors with low significance which suggests that regularization would again be a good idea. First, however, lets see if the model has a higher AUC already.
 
 
 ```{r}
@@ -208,7 +208,7 @@ abline(a = 0, b = 1, lty = 2, col = "gray")
 auc_value <- auc(roc_logistic2)
 print(paste("AUC =", round(auc_value, 3)))
 ```
-Good, we have already seen a significant increase in AUC, indicating that our model is better at discriminating between the two outcomes. Now, lets see if regularisation improves our model performance further.
+Good, we have already seen a significant increase in AUC, indicating that our model is better at discriminating between the two outcomes. Now, lets see if regularization improves our model performance further.
 
 
 ```{r}
@@ -276,6 +276,8 @@ abline(a = 0, b = 1, lty = 2, col = "gray")
 auc_value <- auc(roc_final)
 print(paste("AUC =", round(auc_value, 3)))
 
+accuracy <- mean(y_test2 == pred_classes)
+print(paste("Accuracy =", round(accuracy, 3)))
 ```
 
-Again our AUC has improved. An AUC of over 0.9 shows that at this point in the game the model is very confident in predicting the outcome of the game. This would make it a much more usable model in the real world especially as it is so fast to run.
+Again our AUC has improved. An AUC of over 0.9 shows that at this point in the game the model is very confident in predicting the outcome of the game. This would make it a much more usable model in the real world especially as it is so fast to run. In particular with a threshold set at 0.5, it achieves an accuracy of 0.831, so it correctly predicts the outcome of 83.1%. It is likely we could improve this by optimising the threshold.
