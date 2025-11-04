@@ -24,8 +24,9 @@ All report content is in the directory:
 * report/
 
   The report takes the following structure:
-* 01-Data.rmd
-* 02-Introduction.rmd
+* 01 - Data.rmd
+* 02 - Introduction.rmd
+* 02 - Introduction.html
 * 03.1 - Logistic Regression.rmd
 * 03.1 - Logistic-Regression.html
 * 03.2 - Logistic Regresion.rmd
