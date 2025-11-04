@@ -38,8 +38,8 @@ All report content is in the directory:
 * 05 - SVM.ipynb
 * 06 - Random Forest.ipynb
 * 07 - Conclusion.ipynb
-  With HTML output of the Rmd content included for convenience.
 
+ With HTML output of the Rmd content included for convenience.
   ### Requirements:
 
 Requirements for the Rmd files are given within each script, or can be installed in advance using:
