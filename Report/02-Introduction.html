@@ -425,12 +425,39 @@ it doesn’t tell you how well calibrated the model is, i.e how close the
 predicted probabilities match the true likelihoods. This is bad because
 you could have a model with a high AUC which systematically
 overestimates probabilities, which would lead to odds being set wrong.
-There are other metrics such as the Brier Score [2] and Callibration
-plot [3] which attempt to fix this, however, they are usually more
-complicated to implement, where as AUC is a common method which is built
-into many functions automatically. Ultimately, we decided that the main
-aim of our project was to build models that could effectively
-discriminate between outcomes and thus AUC was satisfactory.</p>
+There are other metrics such as the Brier Score [2] and Calibration plot
+[3] which attempt to fix this, however, they are usually more
+complicated to implement for things such as cross-validation, where as
+AUC is a common method which is built into many functions
+automatically.</p>
+<ul>
+<li><p><strong>Calibration Plot -</strong> Calibration plots visually
+assess how well a model’s predicted probabilities align with actual
+outcomes. It works by grouping events into bins based off the predicted
+probabilities, i.e Bin 1 [0-0.1), Bin 2 [0.1-0.2) etc. Then it takes
+observed frequency = proportion of wins in that bin, and plot it against
+the average predicted probability in that bin. If the line lies on y=x
+then it is perfectly calibrated. This is a qualitative approach however
+similar numerical metrics can be defined. This may not have been
+appropriate as n is relatively small and was unlikely to be
+stable.</p></li>
+<li><p><strong>Brier Score -</strong> The Brier score is defined as
+<span class="math inline">\(BS=\frac{1}{N}\sum_{i=1}^N(\hat{p}_i-y_i)^2\)</span>,
+the mean squared error between the predicted probability and the actual
+outcome. If <span class="math inline">\(BS=0\)</span> then we have
+perfect prediction, if <span class="math inline">\(BS=1\)</span> this us
+the worst possible. It can be decomposed into [4] <span class="math display">\[BS = \text{Reliability} - \text{Resolution} +
+\text{Uncertainty}.\]</span> The reliability tells us how calibrated the
+predicted probabilities are, the resolution how well the model
+distinguishes between winners and losers and the uncertainty, the
+inherent unpredictability of the outcome. Therefore the Brier score not
+only measures calibration but also discrimination, making is a strong
+contender to rival AUC.</p></li>
+</ul>
+<p>Note it is possible for a model to be well calibrated but poor at
+discriminating. Ultimately, we decided that the main aim of our project
+was to build models that could effectively discriminate between outcomes
+and thus AUC was satisfactory.</p>
 </div>
 </div>
 <div id="references" class="section level2">
@@ -442,6 +469,9 @@ terms of probability.</em> Monthly Weather Review, 78(1), 1–3</p>
 <p>[3] DeGroot, M. H., &amp; Fienberg, S. E. (1983). <em>The comparison
 and evaluation of forecasters.</em> The Statistician, 32(1/2),
 12–22.</p>
+<p>[4] Murphy, Allan H. “A new vector partition of the probability
+score.” Journal of Applied Meteorology and Climatology 12.4 (1973):
+595-600.</p>
 </div>
 </div>
 
