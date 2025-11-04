@@ -1,0 +1,742 @@
+---
+title: "Model Implementation"
+author: "Youssef Othman"
+date: "2025-11-02"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+In the previous part of this investigation into the logistic mixed-effect model,
+we determined our fixed effects by analyzing the correlation between various 
+candidate metrics and the winner variable. We selected highly correlated pairs
+which produce good predictors whilst also getting rid of highly colinear metrics
+which would make fitting the models difficult due to computational instability 
+when calculating the approximation of the likelihood and the parameters that 
+maximise it. This is also verified by error messages produced by the ```glmer```
+function when you try and fit a model of which the predictors are highly colinear.
+
+
+Now we aim to find what the optimal random effects and therefore model is 
+in the sense of optimising :
+
+- AIC/BIC
+- Intraclass correlation coefficient
+- Various accuracy measures including the AUC.
+
+We then decide the best model based on which model maximises the AUC, as this is
+our chosen metric.
+
+---
+
+### Install and load required packages:
+```{r}
+pkgs <- c("lme4", "ggplot2", "pROC", "caret", "dplyr","performance")
+
+for (p in pkgs) {
+  if (!require(p, character.only = TRUE)) install.packages(p)
+  library(p, character.only = TRUE)
+}
+```
+
+
+
+We load in the engineered data from python :
+- To do this ensure you have set your working directory to be in the same place
+as the csv. (If you have ran the python script first this should be the case)
+
+
+```{r}
+# Load both datasets
+data1 <- read.csv("cricket_model_data_10.csv")
+data2 <- read.csv("cricket_model_data_60.csv")
+
+
+# Convert to factors where appropriate
+data1$season <- as.factor(data1$season)
+data1$team1 <- as.factor(data1$team1)
+data1$team2 <- as.factor(data1$team2)
+data1$venue <- as.factor(data1$venue)
+data1$winner_binary <- as.factor(data1$winner_binary)
+
+# Convert to factors where appropriate
+data2$season <- as.factor(data2$season)
+data2$team1 <- as.factor(data2$team1)
+data2$team2 <- as.factor(data2$team2)
+data2$venue <- as.factor(data2$venue)
+data2$winner_binary <- as.factor(data2$winner_binary)
+```
+
+We split both datasets using the normal test-train split:
+
+
+```{r}
+#Test-Train Split:
+
+set.seed(123)
+
+train_indices1 <- createDataPartition(data1$winner_binary, p = 0.8, list = FALSE)
+train_data1 <- data1[train_indices1, ]
+test_data1 <- data1[-train_indices1, ]
+
+train_indices2 <- createDataPartition(data2$winner_binary, p = 0.8, list = FALSE)
+train_data2 <- data2[train_indices2, ]
+test_data2 <- data2[-train_indices2, ]
+
+```
+
+
+Then we scale the data to stop the following error from popping up when we try
+to fit the model:
+
+`Warning in checkConv(attr(opt, "derivs"), optpar, ctrl = controlcheckConv,  :
+  Model is nearly unidentifiable: very large eigenvalue.
+-Rescale variables'
+
+
+This then also makes the models run much quicker.
+
+```{r}
+# Identify numeric predictors (don’t include the binary response or factors)
+num_vars1 <- c("team1_wickets","team1_dot_ball_percentage","team1_run_rate")
+num_vars2 <- c("wickets_difference", "runs_difference", "run_rate_difference",
+              "team1_dot_ball_percentage" )
+
+# Compute scaling parameters from training data
+train_means <- sapply(train_data2[num_vars2], mean, na.rm = TRUE)
+train_sds   <- sapply(train_data2[num_vars2], sd,   na.rm = TRUE)
+
+# Apply scaling to both train and test using training parameters
+train_scaled <- train_data2
+test_scaled  <- test_data2
+
+train_scaled[num_vars2] <- scale(train_data2[num_vars2], center = train_means, scale = train_sds)
+test_scaled[num_vars2]  <- scale(test_data2[num_vars2],  center = train_means, scale = train_sds)
+
+
+```
+
+# Specifying the Random Effects:
+
+Now that we have chosen our fixed effects all is left is to choose the random 
+effects for our model. We consider 5 different options for our model : 3 are 
+just simple random intercepts, one has a random slope parameter and one has only
+the fixed effects. 
+
+```{r}
+#fixed effects considered from the python analysis 
+fixed_effects <- "runs_difference + wickets_difference + team1_dot_ball_percentage + run_rate_difference + toss_won_by_team1"
+
+
+# Random effects candidates:
+
+
+# Option 1: Random intercepts for team1 and team2
+formula1 <- as.formula(paste(c("winner_binary ~", fixed_effects, "+ (1 | team1)",
+                             "+ (1 | team2)"),
+                       collapse = " "))
+
+# Option 2: Add season as random intercept
+formula2 <- as.formula(paste(c("winner_binary ~", fixed_effects, "+ (1 | season)",
+                               "+ (1 | team1)", "+ (1 | team2)"),
+                             collapse = " "))
+
+# Option 3: Add venue as another grouping factor
+formula3 <- as.formula(paste(c("winner_binary ~", fixed_effects, "+ (1 | season)",
+                             "+ (1 | venue)", "+ (1 | team1)", "+ (1 | team2)"),
+                             collapse = " "))
+
+# Option 3.1: Add random slope for run_rate_difference by team 
+formula3.1 <- as.formula(paste(c("winner_binary ~", fixed_effects, 
+                               "+ (1 + run_rate_difference | team1)", 
+                               "+(1 + run_rate_difference | team2)", 
+                               "+ (1 | season)", "+ (1 | venue)"),
+                         collapse = " "))
+
+# Option 4: No random effects (pure GLM baseline)
+formula4 <- as.formula(paste("winner_binary ~", fixed_effects))
+```
+
+
+
+## Fitting the models:
+
+We fit the various models and check if any models don't converge or pop up with 
+'isSingular'.
+```{r}
+
+# Fit all models
+
+
+model1 <- glmer(formula1, data = train_scaled, family = binomial(link = "logit"),
+                control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+model2 <- glmer(formula2, data = train_scaled, family = binomial(link = "logit"),
+                control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+model3 <- glmer(formula3, data = train_scaled, family = binomial(link = "logit"),
+                control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+
+# Random slope version (only if computationally feasible)
+model3.1 <- tryCatch({
+  glmer(formula3.1, data = train_scaled, family = binomial(link = "logit"),
+        control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 100000)))
+}, error = function(e) { message("Model 3.1 failed to converge"); return(NULL) })
+
+# GLM version
+model4 <- glm(formula4, data = train_scaled, family = binomial(link = "logit"))
+```
+Here we see that the GLMM with random slopes produced an 'isSingular' error 
+which according to help('isSingular') this error occurs when the variances of 
+one or more linear combinations of effects are close to zero. 
+
+Intuitively and according to expert opinion from Dan and Elliot, the most likely
+pair of predictors for a random slope is the ```run_rate_difference | team1``` 
+as each team has different playing strategies in terms of rate of which they score 
+runs. This suggests that random slopes are an unnecessary consideration of this 
+model and therefore we dismiss it as a candidate for our optimal model.
+
+### Model Comparison with AIC/BIC:
+Here we look at the AIC/BIC values of the models and take this into account when 
+we decide between our models. This is a standard approach to model selection.
+```{r}
+print(" MODEL COMPARISON")
+
+models <- list(Model1 = model1, Model2 = model2, Model3 = model3, Model3.1 = model3.1, Model4 = model4)
+
+aic_values <- sapply(models, function(m) if (!is.null(m)) AIC(m) else NA)
+bic_values <- sapply(models, function(m) if (!is.null(m)) BIC(m) else NA)
+
+print("AIC values:")
+print(aic_values)
+print(paste("Best model by AIC:", names(which.min(aic_values))))
+
+print("BIC values:")
+print(bic_values)
+print(paste("Best model by BIC:", names(which.min(bic_values))))
+```
+From this output, it suggests that the first model which only has 'team1' and 
+'team2' as the random effect performs best in the BIC or the second model which
+incorporates the 'season' variable as a random effect that performs best in the 
+AIC. They are both close in terms of these metrics with not much separating 
+Model1, Model2 and Model3. 
+
+However, one thing we can say is that Model3.1 and Model4 do perform noticeably 
+worse. This further justifies that incorporating that random slopes are not a 
+justifiable consideration and poor performance by Model4 suggests that incorporating
+random effects does indeed improve model fit by some sense.
+
+
+
+## Variance and ICC:
+
+### Intraclass Correlation Coefficient (ICC) in Mixed Models
+
+The Intraclass Correlation Coefficient (ICC) measures the proportion of the total variance in the response that is attributable to differences between groups (i.e., the random effects).  
+In a mixed model, it quantifies how strongly units within the same group resemble each other.[1]
+
+---
+
+#### General definition
+
+For a standard linear mixed model of the form
+
+$$
+y_{ij} = \beta_0 + u_j + \varepsilon_{ij},
+$$
+
+where $u_j \sim \mathcal{N}(0, \sigma_u^2)$ represents the between-group variance and  
+$\varepsilon_{ij} \sim \mathcal{N}(0, \sigma_\varepsilon^2)$ represents the within-group variance,  
+the ICC is defined as
+
+$$
+\text{ICC} = \frac{\sigma_u^2}{\sigma_u^2 + \sigma_\varepsilon^2}.
+$$
+
+A higher ICC indicates stronger within-group similarity, implying that group-level effects account for a larger share of total variability.
+
+---
+
+#### ICC in the logistic mixed model
+
+In a logistic mixed-effects model, the outcome is binary, and the level-1 residual variance $\sigma_\varepsilon^2$ is not directly estimated because it depends on the logistic distribution.  
+Following standard practice (Snijders & Bosker, 2012)[2], this variance is approximated as
+
+$$
+\sigma_\varepsilon^2 = \frac{\pi^2}{3} \approx 3.29.
+$$
+
+Therefore the ICC becomes
+
+$$
+\text{ICC} = \frac{\sigma_u^2}{\sigma_u^2 + \frac{\pi^2}{3}}.
+$$
+
+This represents the proportion of total variance in the log-odds scale explained by group-level clustering.
+
+---
+
+#### Using the ICC for random effects selection
+
+The ICC can be used as a diagnostic to assess whether including random effects is justified [1]:
+
+- If the ICC is close to zero, between-group variability is negligible, and a fixed-effects model (no random intercepts) may suffice.
+
+- Comparing ICC values for different grouping variables (e.g., team, season, venue) helps identify which random effects meaningfully contribute to the model.
+
+In particular, high ICC suggests that grouping explains substantial variance and 
+indicates practical significance of random effects. This is a good indicator of 
+how justified our random effects are.[1],[3]
+
+We can implement this calculation in R using the ```icc``` function in the 
+```performance``` package [1]. This package supports ICC calculations for the 
+logistic regression mixed -effects model. It provides group-level calculations if
+we set ```by_group = TRUE``` . Setting `by_group = FALSE` provides two values 
+the unadjusted ICC and the adjusted ICC. The adjusted ICC only relates to the random effects, 
+the unadjusted ICC also takes the fixed effects variances into account.
+
+
+Following the documentation :
+---
+
+```{r}
+icc(model1, by_group = TRUE)
+icc(model1)
+icc(model2, by_group = TRUE)
+icc(model2)
+icc(model3, by_group = TRUE)
+icc(model3)
+icc(model3.1, by_group = TRUE)
+
+#should be NA, just to check
+icc(model4, by_group = TRUE)
+```
+
+### Results Summary
+
+The results from the five models are summarised below, focusing on the estimated Intraclass Correlation Coefficients (ICCs), which quantify the proportion of total variance explained by the grouping structure.
+
+For the first three models, ICCs were computed for different grouping variables:
+
+- **Model 1**: ICCs for `team1` (0.117) and `team2` (0.140), with an adjusted ICC of 0.257.  
+- **Model 2**: ICCs for `season` (0.017), `team1` (0.107), and `team2` (0.132), with an adjusted ICC of 0.256.  
+- **Model 3**: ICCs for `venue` (0.022), `team2` (0.136), `team1` (0.108), and `season` (0.017), with an adjusted ICC of 0.283.
+
+Across these models, the ICC values for `team1` and `team2` remain consistently higher than those for `season` or `venue`, indicating that a notable proportion of the response variance is attributable to differences between teams. In contrast, `season` and `venue` show very low ICC values, suggesting limited within-group correlation for these effects.
+
+Based on these results, we can infer that `team1` and `team2` are optimal candidates for inclusion as random effects in the model, as they capture meaningful within-group variability. Including additional random effects such as `season` or `venue` does not appear to substantially improve model fit and may introduce unnecessary complexity.
+
+The fourth model produced a singular fit warning, meaning one or more random effect variances were estimated as zero. This suggests that the model is overparameterised or that one of the random effects does not contribute to explaining variance in the data. As a result, Model 4 is not a valid fit and should be excluded from interpretation.
+
+In summary, the ICC analysis indicates that a model including only `team1` and `team2` as random effects (as in Model 1) is likely to perform best, as these effects explain the most substantial within-group variance without overfitting.
+
+
+
+## Model Selection by Predictive Measures:
+
+Now, finally, in order to decide which model we will use we do one last check of 
+the different predicitive measure to check how well our models perform on test data.
+
+We make a function which takes in the model, the training data and the test data 
+and creates a list of various predictive measures:
+
+```{r}
+
+# Model Evaluation Function for GLMMs
+
+
+evaluate_glmm_model <- function(model, train_data, test_data, 
+                                model_name = "GLMM Model",
+                                threshold = 0.5) {
+
+  #  Get predictions on training and test data
+
+  
+  # Training predictions
+  train_pred_prob <- predict(model, newdata = train_data, type = "response", 
+                             allow.new.levels = TRUE)
+  train_pred_class <- ifelse(train_pred_prob > threshold, 1, 0)
+  train_actual <- train_data$winner_binary
+  
+  # Test predictions
+  test_pred_prob <- predict(model, newdata = test_data, type = "response", 
+                            allow.new.levels = TRUE)
+  test_pred_class <- ifelse(test_pred_prob > threshold, 1, 0)
+  test_actual <- test_data$winner_binary
+  
+
+  #  ROC and AUC
+
+  
+  # Training ROC
+  train_roc <- roc(train_actual, train_pred_prob, quiet = TRUE)
+  train_auc <- auc(train_roc)
+  
+  # Test ROC
+  test_roc <- roc(test_actual, test_pred_prob, quiet = TRUE)
+  test_auc <- auc(test_roc)
+  
+
+  #  Confusion Matrix and derived metrics
+
+  
+  # Training confusion matrix
+  train_cm <- table(Predicted = train_pred_class, Actual = train_actual)
+  train_accuracy <- sum(diag(train_cm)) / sum(train_cm)
+  
+  # Test confusion matrix
+  test_cm <- table(Predicted = test_pred_class, Actual = test_actual)
+  test_accuracy <- sum(diag(test_cm)) / sum(test_cm)
+  
+
+  #  Precision, Recall
+
+  
+  # Training metrics
+  train_tp <- train_cm[2, 2]
+  train_fp <- train_cm[2, 1]
+  train_fn <- train_cm[1, 2]
+  train_tn <- train_cm[1, 1]
+  
+  train_precision <- train_tp / (train_tp + train_fp)
+  train_recall <- train_tp / (train_tp + train_fn)
+  train_specificity <- train_tn / (train_tn + train_fp)
+  
+  # Test metrics
+  test_tp <- test_cm[2, 2]
+  test_fp <- test_cm[2, 1]
+  test_fn <- test_cm[1, 2]
+  test_tn <- test_cm[1, 1]
+  
+  test_precision <- test_tp / (test_tp + test_fp)
+  test_recall <- test_tp / (test_tp + test_fn)
+  test_specificity <- test_tn / (test_tn + test_fp)
+
+  
+
+  
+  
+  # Return results
+
+  
+  results <- list(
+    model_name = model_name,
+    
+    # Training metrics
+    train = list(
+      auc = as.numeric(train_auc),
+      accuracy = train_accuracy,
+      precision = train_precision,
+      recall = train_recall,
+      specificity = train_specificity,
+      confusion_matrix = train_cm,
+      predictions = data.frame(
+        actual = train_actual,
+        predicted_prob = train_pred_prob,
+        predicted_class = train_pred_class
+      )
+    ),
+    
+    # Test metrics
+    test = list(
+      auc = as.numeric(test_auc),
+      accuracy = test_accuracy,
+      precision = test_precision,
+      recall = test_recall,
+      specificity = test_specificity,
+      confusion_matrix = test_cm,
+      predictions = data.frame(
+        actual = test_actual,
+        predicted_prob = test_pred_prob,
+        predicted_class = test_pred_class
+      )
+    ),
+    
+    # ROC objects
+    roc_train = train_roc,
+    roc_test = test_roc
+  )
+
+  
+  invisible(results)
+}
+```
+
+Now that we have created a function to create our various measures of accuracy
+we output our results and compare them particulary focusing on the AUC metric.
+
+
+```{r}
+res1 <- evaluate_glmm_model(model1, train_scaled, test_scaled, "Baseline")
+res2 <- evaluate_glmm_model(model2, train_scaled, test_scaled, "Extended")
+res3 <- evaluate_glmm_model(model3, train_scaled, test_scaled, "Hybrid")
+
+
+#  Create a summary table of all model metrics
+
+
+summary_table <- bind_rows(
+  data.frame(
+    Model = res1$model_name,
+    Dataset = "Training",
+    AUC = res1$train$auc,
+    Accuracy = res1$train$accuracy,
+    Precision = res1$train$precision,
+    Recall = res1$train$recall,
+    Specificity = res1$train$specificity
+  ),
+  data.frame(
+    Model = res1$model_name,
+    Dataset = "Test",
+    AUC = res1$test$auc,
+    Accuracy = res1$test$accuracy,
+    Precision = res1$test$precision,
+    Recall = res1$test$recall,
+    Specificity = res1$test$specificity
+  ),
+  data.frame(
+    Model = res2$model_name,
+    Dataset = "Training",
+    AUC = res2$train$auc,
+    Accuracy = res2$train$accuracy,
+    Precision = res2$train$precision,
+    Recall = res2$train$recall,
+    Specificity = res2$train$specificity
+  ),
+  data.frame(
+    Model = res2$model_name,
+    Dataset = "Test",
+    AUC = res2$test$auc,
+    Accuracy = res2$test$accuracy,
+    Precision = res2$test$precision,
+    Recall = res2$test$recall,
+    Specificity = res2$test$specificity
+  ),
+  data.frame(
+    Model = res3$model_name,
+    Dataset = "Training",
+    AUC = res3$train$auc,
+    Accuracy = res3$train$accuracy,
+    Precision = res3$train$precision,
+    Recall = res3$train$recall,
+    Specificity = res3$train$specificity
+  ),
+  data.frame(
+    Model = res3$model_name,
+    Dataset = "Test",
+    AUC = res3$test$auc,
+    Accuracy = res3$test$accuracy,
+    Precision = res3$test$precision,
+    Recall = res3$test$recall,
+    Specificity = res3$test$specificity
+  )
+)
+
+# Round for display
+summary_table <- summary_table %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+print(summary_table)
+
+```
+
+From this table we can see that the hybrid model does the best in training and 
+it doesn't do as well in the test across all of the metrics considered.
+
+If we purely look at the test AUC metric then the extended model performs the 
+best and it seems to be the best fit as it perfomrs second best in the trainning
+data and performs the best in the test data. This shows that the model is not
+overfitting.
+
+
+## ROC Curves Visualisation
+```{r}
+
+#  Combine ROC curves for visualisation
+
+
+roc_data_test <- data.frame(
+  FPR = c(1 - res1$roc_test$specificities,
+          1 - res2$roc_test$specificities,
+          1 - res3$roc_test$specificities),
+  TPR = c(res1$roc_test$sensitivities,
+          res2$roc_test$sensitivities,
+          res3$roc_test$sensitivities),
+  Model = factor(rep(c(res1$model_name, res2$model_name, res3$model_name),
+                     times = c(length(res1$roc_test$specificities),
+                               length(res2$roc_test$specificities),
+                               length(res3$roc_test$specificities))))
+)
+
+
+# Plot Test ROC curves 
+
+ggplot(roc_data_test, aes(x = FPR, y = TPR, color = Model)) +
+  geom_line(linewidth = 1.2) +
+  geom_abline(intercept = 0, slope = 1, color = "gray60", linetype = "dashed") +
+  labs(
+    title = "ROC Curve Comparison of GLMM Models",
+    subtitle = "Test Data",
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "top",   # clean legend above the plot
+    legend.title = element_blank(),
+    legend.background = element_rect(fill = "white", color = "gray80"),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_color_manual(values = c(
+    "Baseline" = "#F8766D",
+    "Extended" = "#00BFC4",
+    "Hybrid"   = "#7CAE00"
+  )) +
+  annotate("text", x = 0.6, y = 0.25,
+           label = paste0("Baseline AUC = ", round(res1$test$auc, 3)),
+           color = "#F8766D", size = 4, hjust = 0) +
+  annotate("text", x = 0.6, y = 0.18,
+           label = paste0("Extended AUC = ", round(res2$test$auc, 3)),
+           color = "#00BFC4", size = 4, hjust = 0) +
+  annotate("text", x = 0.6, y = 0.11,
+           label = paste0("Hybrid AUC = ", round(res3$test$auc, 3)),
+           color = "#7CAE00", size = 4, hjust = 0)
+```
+
+Therefore, we conclude that our extended model - which performs well across the 
+board in terms of model selection optimal in the sense of AIC,BIC,and 
+optimally in the sense of maximizing the test AUC - is our best model for the 
+classification task of predicting the outcome of a cricket match based on the 
+first innings and the first 10 overs.
+
+
+
+## Saving results to a CSV:
+
+Here we save the best performing model to a dataframe in order to combine it with
+our other models 
+```{r}
+roc_glmm <- data.frame(
+  FPR = c(1 - res2$roc_test$specificities),
+  TPR = c(res2$roc_test$sensitivities))
+
+write.csv(roc_glmm,"roc_glmm.csv")
+```
+
+# Looking at our Winner:
+
+```{r}
+summary(model2)
+```
+The model above is specified below mathematically:
+
+We model each match outcome $Y_i$ as a Bernoulli random variable with probability $p_i$ that the batting team wins. Using the logit link, the model is
+
+$$
+Y_i \sim \text{Bernoulli}(p_i),\qquad p_i = g^{-1}(\eta_i) = \mathrm{logit}^{-1}(\eta_i),
+$$
+
+with linear predictor
+
+$$
+\eta_i = \beta_0
+        + \beta_1\,\text{runs_difference}_i
+        + \beta_2\,\text{wickets_difference}_i
+        + \beta_3\,\text{team1_dot_ball_percentage}_i
+        + \beta_4\,\text{run_rate_difference}_i
+        + \beta_5\,\text{toss_won_by_team1}_i
+        + b_{\text{season}(i)} + b_{\text{team1}(i)} + b_{\text{team2}(i)}.
+$$
+
+Here $b_{\text{season}(i)}$ is the random intercept for the season of observation $i$, $b_{\text{team1}(i)}$ is the random intercept for the batting team in observation $i$, and $b_{\text{team2}(i)}$ is the random intercept for the bowling/chasing team in observation $i$.
+
+The random effects are assumed independent (across grouping factors) and normally distributed:
+
+$$
+b_{\text{season}(i)} \overset{\text{i.i.d.}}{\sim} N(0,\sigma_{\text{season}}^2)
+$$
+
+$$
+b_{\text{team1}(i)} \overset{\text{i.i.d.}}{\sim} N(0,\sigma_{\text{team1}}^2)
+$$
+
+$$
+b_{\text{team2}(i)} \overset{\text{i.i.d.}}{\sim} N(0,\sigma_{\text{team2}}^2)
+$$
+
+Equivalently, if we collect the random intercepts into a vector $u = (b_{\text{season}}, b_{\text{team1}}, b_{\text{team2}})^\top$, the block-diagonal covariance (variance-component) matrix $G$ is
+
+$$
+G = \mathrm{diag}\big(\sigma_{\text{season}}^2,\; \sigma_{\text{team1}}^2,\; \sigma_{\text{team2}}^2\big).
+$$
+
+Using the estimates provided, the fitted parameter values are
+
+- fixed effects
+$$
+\begin{aligned}
+\hat\beta_0 &= 0.406593,\quad(\text{intercept}),\\
+\hat\beta_1 &= 0.476426\quad(\text{runs_difference}),\\
+\hat\beta_2 &= -0.357854\quad(\text{wickets_difference}),\\
+\hat\beta_3 &= -0.153276\quad(\text{team1_dot_ball_percentage}),\\
+\hat\beta_4 &= 0.146124\quad(\text{run_rate_difference}),\\
+\hat\beta_5 &= 0.009225\quad(\text{toss_won_by_team1}).
+\end{aligned}
+$$
+
+- random-effect variances
+$$
+\hat\sigma_{\text{season}}^2 = 0.07658,\qquad
+\hat\sigma_{\text{team1}}^2 = 0.47177,\qquad
+\hat\sigma_{\text{team2}}^2 = 0.58314.
+$$
+
+Thus the fitted linear predictor for observation $i$ is
+
+$$
+\hat\eta_i = 0.406593
+        + 0.476426\cdot\text{runs_difference}_i
+        - 0.357854\cdot\text{wickets_difference}_i
+        - 0.153276\cdot\text{team1_dot_ball_percentage}_i
+        + 0.146124\cdot\text{run_rate_difference}_i
+        + 0.009225\cdot\text{toss_won_by_team1}_i
+        + \hat b_{\text{season}(i)} + \hat b_{\text{team1}(i)} + \hat b_{\text{team2}(i)}.
+$$
+
+and the predicted probability is
+
+$$
+\hat p_i = \mathrm{logit}^{-1}(\hat\eta_i)=\frac{\exp(\hat\eta_i)}{1+\exp(\hat\eta_i)}.
+$$
+
+Interpretation:
+
+- The estimates are interpreted as follows, one unit increase in the runs difference is associated
+with a 0.476 increase in the expected log odds of team 1 winning. This makes sense as an increase
+in the runs difference = runs of team1 - runs of team2, should lead to increase in the odds of team 1
+winning.
+- The variance estimates quantify between-group variability on the linear predictor (log-odds) scale: for example, $\sigma_{\text{team2}}^2=0.58314$ means team-to-team differences (as team2) contribute variance $0.58314$ to the linear predictor.
+
+## Conclusion:
+
+We first defined the structure of the Generalized Linear Mixed Model (GLMM) and specified an appropriate link function for the binary response. The selection of fixed effects was guided by domain expertise and statistical diagnostics, highly correlated and collinear variables were identified and removed to ensure model stability.
+
+Next, we evaluated several candidate random effects structures. Through comparison of model performance metrics, we found that including **season**, **team1**, and **team2** as random effects yielded the highest AUC among all configurations.  
+
+However, the Intraclass Correlation Coefficient (ICC) analysis suggests that the **season** effect contributes minimally to the within-group variance. This implies that excluding the season random effect could lead to a more simplified model without substantially reducing predictive performance.
+ 
+When compared with Dan’s logistic regression model, the GLMM did not achieve a higher AUC nor did it dominate his ROC curve. This is somewhat unexpected, as the inclusion of random effects would typically be expected to enhance model performance by capturing group-level variation.
+
+Several factors may explain this result. It is possible that the estimation procedure was limited by the efficiency of the likelihood approximation used, or that the absence of regularisation allowed some degree of overfitting. Future work could explore the use of Bayesian estimation methods, such as MCMC, to obtain more accurate likelihood estimates and potentially improve model performance.
+
+#### References
+- [1] https://easystats.github.io/performance/reference/icc.html
+- [2] Snijders, T. A. B., & Bosker, R. J. (2012). *Multilevel Analysis: An Introduction to Basic and Advanced Multilevel Modeling* (2nd ed.). Sage.  
+- [3] Hox, J. (2010). *Multilevel Analysis: Techniques and Applications* (2nd Edition). Routledge.
+
