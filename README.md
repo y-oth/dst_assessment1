@@ -26,17 +26,17 @@ All report content is in the directory:
   The report takes the following structure:
 * 01-Data.rmd
 * 02-Introduction.rmd
-*03.1-Logistic Regression.rmd
-*03.1-Logistic Regression.html
-*03.2-Logistic Regresion.rmd
-*03.2-Logistic Regresion.html
-*04.1 - Logistic Mixed Model Background.ipynb
-*04.2 - Data Engineering and Analysis.ipynb
-*04.3 - Logistic Mixed Model Implementation.rmd
-*04.3 - Logistic Mixed Model Implementation.html 
-*05 - SVM.ipynb
-*06 - Random Forest.ipynb
-*07 - Conclusion.ipynb
+* 03.1 - Logistic Regression.rmd
+* 03.1 - Logistic-Regression.html
+* 03.2 - Logistic Regresion.rmd
+* 03.2 - Logistic-Regresion.html
+* 04.1 - Logistic Mixed Model Background.ipynb
+* 04.2 - Data Engineering and Analysis.ipynb
+* 04.3 - Logistic Mixed Model Implementation.rmd
+* 04.3 - Logistic Mixed Model Implementation.html 
+* 05 - SVM.ipynb
+* 06 - Random Forest.ipynb
+* 07 - Conclusion.ipynb
   With HTML output of the Rmd content included for convenience.
 
   ### Requirements:
