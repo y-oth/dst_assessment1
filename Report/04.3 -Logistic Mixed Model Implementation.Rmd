@@ -731,9 +731,9 @@ Next, we evaluated several candidate random effects structures. Through comparis
 
 However, the Intraclass Correlation Coefficient (ICC) analysis suggests that the **season** effect contributes minimally to the within-group variance. This implies that excluding the season random effect could lead to a more simplified model without substantially reducing predictive performance.
  
-When compared with Dan’s logistic regression model, the GLMM did not achieve a higher AUC nor did it dominate his ROC curve. This is somewhat unexpected, as the inclusion of random effects would typically be expected to enhance model performance by capturing group-level variation.
+When compared with Dan’s regularised logistic regression model, the GLMM did not achieve a higher AUC nor did it dominate his ROC curve. This is somewhat unexpected, as the inclusion of random effects would typically be expected to enhance model performance by capturing group-level variation.
 
-Several factors may explain this result. It is possible that the estimation procedure was limited by the efficiency of the likelihood approximation used, or that the absence of regularisation allowed some degree of overfitting. Future work could explore the use of Bayesian estimation methods, such as MCMC, to obtain more accurate likelihood estimates and potentially improve model performance.
+Several factors may explain this result. It is possible that the estimation procedure was limited by the efficiency of the likelihood approximation used, or that the absence of regularisation allowed some degree of overfitting. This is motivated by the observation that the unregularised logistic regression model produced the same AUC of 0.761. Future work could explore the use of Bayesian estimation methods, such as MCMC, to obtain more accurate likelihood estimates and potentially improve model performance.
 
 #### References
 - [1] https://easystats.github.io/performance/reference/icc.html
