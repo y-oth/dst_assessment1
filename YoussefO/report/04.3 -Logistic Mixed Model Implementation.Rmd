@@ -247,7 +247,7 @@ In a mixed model, it quantifies how strongly units within the same group resembl
 For a standard linear mixed model of the form
 
 $$
-y_{ij} = \beta_0 + u_j + \varepsilon_{ij},
+y_{ij} = \beta_0 +\sum_{h=1}^{p}\beta_hx_{ij} + u_j + \varepsilon_{ij},
 $$
 
 where $u_j \sim \mathcal{N}(0, \sigma_u^2)$ represents the between-group variance and  
@@ -259,7 +259,7 @@ $$
 $$
 
 A higher ICC indicates stronger within-group similarity, implying that group-level effects account for a larger share of total variability.
-
+Extending this to the GLMM, takes the same formula but instead of taking the residual variance, we take the observation-level variance.
 ---
 
 #### ICC in the logistic mixed model
@@ -279,6 +279,19 @@ $$
 
 This represents the proportion of total variance in the log-odds scale explained by group-level clustering.
 
+So far we have only considered one single random intercept. To generalise for the cases where we have 
+$K$ random effects the ICC becomes:
+$$
+ICC_{total} = \frac{\sum_{k=1}^{K}\sigma^{2}_{k}}{\sum_{k=1}^{K}\sigma^{2}_{k} + \frac{\pi^{2}}{3}} 
+$$
+or just $\sigma^{2}_{\epsilon}$ for the case where logit link function is not used.
+
+The ICC for random effect $k$ is defined as the proportion of the total variance explained
+by that grouping factor.
+
+$$
+ICC_{k} = \frac{\sigma^{2}_{k}}{\sum_{m=1}^{K}\sigma^{2}_{m}+ \frac{\pi^{2}}{3}}
+$$
 ---
 
 #### Using the ICC for random effects selection
@@ -300,7 +313,11 @@ we set ```by_group = TRUE``` . Setting `by_group = FALSE` provides two values
 the unadjusted ICC and the adjusted ICC. The adjusted ICC only relates to the random effects, 
 the unadjusted ICC also takes the fixed effects variances into account.
 
-
+Such that the unadjusted ICC = 
+$$ICC_{GLMM} = \frac{\sigma^{2}_{u}}{\sigma^{2}_{u}+\sigma^{2}_{x} + \sigma^{2}_{\epsilon}}$$
+where $\sigma^{2}_{x}$ denotes the variance of the fixed effects and 
+$\sigma^{2}_{u}$,$\sigma^{2}_{\epsilon}$ denote the variances of the random effects
+and the residuals respectively as in the previous formulations.
 Following the documentation :
 ---
 

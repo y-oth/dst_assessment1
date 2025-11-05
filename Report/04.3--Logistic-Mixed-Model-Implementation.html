@@ -592,7 +592,7 @@ resemble each other.[1]</p>
 <h4>General definition</h4>
 <p>For a standard linear mixed model of the form</p>
 <p><span class="math display">\[
-y_{ij} = \beta_0 + u_j + \varepsilon_{ij},
+y_{ij} = \beta_0 +\sum_{h=1}^{p}\beta_hx_{ij} + u_j + \varepsilon_{ij},
 \]</span></p>
 <p>where <span class="math inline">\(u_j \sim \mathcal{N}(0,
 \sigma_u^2)\)</span> represents the between-group variance and<br />
@@ -605,8 +605,9 @@ the ICC is defined as</p>
 \]</span></p>
 <p>A higher ICC indicates stronger within-group similarity, implying
 that group-level effects account for a larger share of total
-variability.</p>
-<hr />
+variability. Extending this to the GLMM, takes the same formula but
+instead of taking the residual variance, we take the observation-level
+variance. —</p>
 </div>
 <div id="icc-in-the-logistic-mixed-model" class="section level4">
 <h4>ICC in the logistic mixed model</h4>
@@ -624,7 +625,20 @@ variance is approximated as</p>
 \]</span></p>
 <p>This represents the proportion of total variance in the log-odds
 scale explained by group-level clustering.</p>
-<hr />
+<p>So far we have only considered one single random intercept. To
+generalise for the cases where we have <span class="math inline">\(K\)</span> random effects the ICC becomes: <span class="math display">\[
+ICC_{total} =
+\frac{\sum_{k=1}^{K}\sigma^{2}_{k}}{\sum_{k=1}^{K}\sigma^{2}_{k} +
+\frac{\pi^{2}}{3}}
+\]</span> or just <span class="math inline">\(\sigma^{2}_{\epsilon}\)</span> for the case where
+logit link function is not used.</p>
+<p>The ICC for random effect <span class="math inline">\(k\)</span> is
+defined as the proportion of the total variance explained by that
+grouping factor.</p>
+<p><span class="math display">\[
+ICC_{k} = \frac{\sigma^{2}_{k}}{\sum_{m=1}^{K}\sigma^{2}_{m}+
+\frac{\pi^{2}}{3}}
+\]</span> —</p>
 </div>
 <div id="using-the-icc-for-random-effects-selection" class="section level4">
 <h4>Using the ICC for random effects selection</h4>
@@ -649,11 +663,12 @@ model. It provides group-level calculations if we set
 provides two values the unadjusted ICC and the adjusted ICC. The
 adjusted ICC only relates to the random effects, the unadjusted ICC also
 takes the fixed effects variances into account.</p>
-</div>
-</div>
-</div>
-<div id="following-the-documentation" class="section level2">
-<h2>Following the documentation :</h2>
+<p>Such that the unadjusted ICC = <span class="math display">\[ICC_{GLMM} =
+\frac{\sigma^{2}_{u}}{\sigma^{2}_{u}+\sigma^{2}_{x} +
+\sigma^{2}_{\epsilon}}\]</span> where <span class="math inline">\(\sigma^{2}_{x}\)</span> denotes the variance of
+the fixed effects and <span class="math inline">\(\sigma^{2}_{u}\)</span>,<span class="math inline">\(\sigma^{2}_{\epsilon}\)</span> denote the
+variances of the random effects and the residuals respectively as in the
+previous formulations. Following the documentation : —</p>
 <pre class="r"><code>icc(model1, by_group = TRUE)</code></pre>
 <pre><code>## # ICC by Group
 ## 
@@ -706,6 +721,8 @@ takes the fixed effects variances into account.</p>
 icc(model4, by_group = TRUE)</code></pre>
 <pre><code>## Warning: `model` has no random effects.</code></pre>
 <pre><code>## NULL</code></pre>
+</div>
+</div>
 <div id="results-summary" class="section level3">
 <h3>Results Summary</h3>
 <p>The results from the five models are summarised below, focusing on
@@ -1063,12 +1080,12 @@ write.csv(roc_glmm,&quot;roc_glmm.csv&quot;)</code></pre>
 ## 
 ## Fixed effects:
 ##                            Estimate Std. Error z value Pr(&gt;|z|)    
-## (Intercept)                0.406593   0.268043   1.517 0.129293    
-## runs_difference            0.476426   0.214835   2.218 0.026580 *  
-## wickets_difference        -0.357854   0.108111  -3.310 0.000933 ***
-## team1_dot_ball_percentage -0.153276   0.186839  -0.820 0.412007    
+## (Intercept)                0.406593   0.268042   1.517 0.129291    
+## runs_difference            0.476426   0.214834   2.218 0.026579 *  
+## wickets_difference        -0.357855   0.108111  -3.310 0.000933 ***
+## team1_dot_ball_percentage -0.153276   0.186838  -0.820 0.412005    
 ## run_rate_difference        0.146124   0.129612   1.127 0.259577    
-## toss_won_by_team1          0.009225   0.164708   0.056 0.955337    
+## toss_won_by_team1          0.009225   0.164707   0.056 0.955336    
 ## ---
 ## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1
 ## 
@@ -1186,17 +1203,19 @@ suggests that the <strong>season</strong> effect contributes minimally
 to the within-group variance. This implies that excluding the season
 random effect could lead to a more simplified model without
 substantially reducing predictive performance.</p>
-<p>When compared with Dan’s logistic regression model, the GLMM did not
-achieve a higher AUC nor did it dominate his ROC curve. This is somewhat
-unexpected, as the inclusion of random effects would typically be
-expected to enhance model performance by capturing group-level
-variation.</p>
+<p>When compared with Dan’s regularised logistic regression model, the
+GLMM did not achieve a higher AUC nor did it dominate his ROC curve.
+This is somewhat unexpected, as the inclusion of random effects would
+typically be expected to enhance model performance by capturing
+group-level variation.</p>
 <p>Several factors may explain this result. It is possible that the
 estimation procedure was limited by the efficiency of the likelihood
 approximation used, or that the absence of regularisation allowed some
-degree of overfitting. Future work could explore the use of Bayesian
-estimation methods, such as MCMC, to obtain more accurate likelihood
-estimates and potentially improve model performance.</p>
+degree of overfitting. This is motivated by the observation that the
+unregularised logistic regression model produced the same AUC of 0.761.
+Future work could explore the use of Bayesian estimation methods, such
+as MCMC, to obtain more accurate likelihood estimates and potentially
+improve model performance.</p>
 <div id="references" class="section level4">
 <h4>References</h4>
 <ul>
