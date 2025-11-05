@@ -357,9 +357,29 @@ display: none;
 </div>
 
 
+<p>In the previous part of this investigation into the logistic
+mixed-effect model, we determined our fixed effects by analyzing the
+correlation between various candidate metrics and the winner variable.
+We selected highly correlated pairs which produce good predictors whilst
+also getting rid of highly colinear metrics which would make fitting the
+models difficult due to computational instability when calculating the
+approximation of the likelihood and the parameters that maximise it.
+This is also verified by error messages produced by the
+<code>glmer</code> function when you try and fit a model of which the
+predictors are highly colinear.</p>
+<p>Now we aim to find what the optimal random effects and therefore
+model is in the sense of optimising :</p>
+<ul>
+<li>AIC/BIC</li>
+<li>Intraclass correlation coefficient</li>
+<li>Various accuracy measures including the AUC.</li>
+</ul>
+<p>We then decide the best model based on which model maximises the AUC,
+as this is our chosen metric.</p>
+<hr />
 <div id="install-and-load-required-packages" class="section level3">
 <h3>Install and load required packages:</h3>
-<pre class="r"><code>pkgs &lt;- c(&quot;lme4&quot;, &quot;ggplot2&quot;, &quot;pROC&quot;, &quot;caret&quot;, &quot;dplyr&quot;)
+<pre class="r"><code>pkgs &lt;- c(&quot;lme4&quot;, &quot;ggplot2&quot;, &quot;pROC&quot;, &quot;caret&quot;, &quot;dplyr&quot;,&quot;performance&quot;)
 
 for (p in pkgs) {
   if (!require(p, character.only = TRUE)) install.packages(p)
@@ -391,9 +411,11 @@ for (p in pkgs) {
 <pre><code>## The following objects are masked from &#39;package:base&#39;:
 ## 
 ##     intersect, setdiff, setequal, union</code></pre>
+<pre><code>## Loading required package: performance</code></pre>
+<pre><code>## Warning: package &#39;performance&#39; was built under R version 4.4.3</code></pre>
 <p>We load in the engineered data from python : - To do this ensure you
 have set your working directory to be in the same place as the csv. (If
-yiu have ran python script first should be the case)</p>
+you have ran the python script first this should be the case)</p>
 <pre class="r"><code># Load both datasets
 data1 &lt;- read.csv(&quot;cricket_model_data_10.csv&quot;)
 data2 &lt;- read.csv(&quot;cricket_model_data_60.csv&quot;)
@@ -445,25 +467,6 @@ test_scaled  &lt;- test_data2
 
 train_scaled[num_vars2] &lt;- scale(train_data2[num_vars2], center = train_means, scale = train_sds)
 test_scaled[num_vars2]  &lt;- scale(test_data2[num_vars2],  center = train_means, scale = train_sds)</code></pre>
-<pre class="r"><code>#Test train split without temporal leakage:
-
-# Simple and effective time-based split
-set.seed(123)
-seasons &lt;- sort(unique(data1$season))
-train_seasons &lt;- seasons[1:round(length(seasons) * 0.8)]
-test_seasons &lt;- seasons[!seasons %in% train_seasons]
-
-train_temp1 &lt;- data1[data1$season %in% train_seasons, ]
-test_temp1&lt;- data1[data1$season %in% test_seasons, ]
-
-train_temp2 &lt;- data2[data2$season %in% train_seasons, ]
-test_temp2&lt;- data2[data2$season %in% test_seasons, ]
-
-# Verify the split preserves team structure
-cat(&quot;Unique teams in training:&quot;, length(unique(c(train_temp1$team1, train_temp1$team2))), &quot;\n&quot;)</code></pre>
-<pre><code>## Unique teams in training: 22</code></pre>
-<pre class="r"><code>cat(&quot;Unique teams in test:&quot;, length(unique(c(test_temp1$team1, test_temp1$team2))), &quot;\n&quot;)</code></pre>
-<pre><code>## Unique teams in test: 19</code></pre>
 </div>
 <div id="specifying-the-random-effects" class="section level1">
 <h1>Specifying the Random Effects:</h1>
@@ -471,11 +474,12 @@ cat(&quot;Unique teams in training:&quot;, length(unique(c(train_temp1$team1, tr
 the random effects for our model. We consider 5 different options for
 our model : 3 are just simple random intercepts, one has a random slope
 parameter and one has only the fixed effects.</p>
-<pre class="r"><code>fixed_effects &lt;- &quot;runs_difference + wickets_difference + team1_dot_ball_percentage + run_rate_difference + toss_won_by_team1&quot;
+<pre class="r"><code>#fixed effects considered from the python analysis 
+fixed_effects &lt;- &quot;runs_difference + wickets_difference + team1_dot_ball_percentage + run_rate_difference + toss_won_by_team1&quot;
 
-# ============================================================
-# Random effects candidates
-# ============================================================
+
+# Random effects candidates:
+
 
 # Option 1: Random intercepts for team1 and team2
 formula1 &lt;- as.formula(paste(c(&quot;winner_binary ~&quot;, fixed_effects, &quot;+ (1 | team1)&quot;,
@@ -505,9 +509,8 @@ formula4 &lt;- as.formula(paste(&quot;winner_binary ~&quot;, fixed_effects))</co
 <h2>Fitting the models:</h2>
 <p>We fit the various models and check if any models don’t converge or
 pop up with ‘isSingular’.</p>
-<pre class="r"><code># ============================================================
-# Fit all models
-# ============================================================
+<pre class="r"><code># Fit all models
+
 
 model1 &lt;- glmer(formula1, data = train_scaled, family = binomial(link = &quot;logit&quot;),
                 control = glmerControl(optimizer = &quot;bobyqa&quot;, optCtrl = list(maxfun = 100000)))
@@ -529,11 +532,19 @@ model4 &lt;- glm(formula4, data = train_scaled, family = binomial(link = &quot;l
 <p>Here we see that the GLMM with random slopes produced an ‘isSingular’
 error which according to help(‘isSingular’) this error occurs when the
 variances of one or more linear combinations of effects are close to
-zero. Which we therefore dismiss.</p>
+zero.</p>
+<p>Intuitively and according to expert opinion from Dan and Elliot, the
+most likely pair of predictors for a random slope is the
+<code>run_rate_difference | team1</code> as each team has different
+playing strategies in terms of rate of which they score runs. This
+suggests that random slopes are an unnecessary consideration of this
+model and therefore we dismiss it as a candidate for our optimal
+model.</p>
 <div id="model-comparison-with-aicbic" class="section level3">
 <h3>Model Comparison with AIC/BIC:</h3>
 <p>Here we look at the AIC/BIC values of the models and take this into
-account when we decide between our models.</p>
+account when we decide between our models. This is a standard approach
+to model selection.</p>
 <pre class="r"><code>print(&quot; MODEL COMPARISON&quot;)</code></pre>
 <pre><code>## [1] &quot; MODEL COMPARISON&quot;</code></pre>
 <pre class="r"><code>models &lt;- list(Model1 = model1, Model2 = model2, Model3 = model3, Model3.1 = model3.1, Model4 = model4)
@@ -558,22 +569,24 @@ print(&quot;AIC values:&quot;)</code></pre>
 <p>From this output, it suggests that the first model which only has
 ‘team1’ and ‘team2’ as the random effect performs best in the BIC or the
 second model which incorporates the ‘season’ variable as a random effect
-that peforms best in the AIC. They are both close in terms of these
-metrics with not much seperating Model1, Model2 and Model3.</p>
+that performs best in the AIC. They are both close in terms of these
+metrics with not much separating Model1, Model2 and Model3.</p>
 <p>However, one thing we can say is that Model3.1 and Model4 do perform
-noticeably worse. This further justifies that incorporating these random
-effects are justified in terms of model selection.</p>
+noticeably worse. This further justifies that incorporating that random
+slopes are not a justifiable consideration and poor performance by
+Model4 suggests that incorporating random effects does indeed improve
+model fit by some sense.</p>
 </div>
 </div>
-<div id="model-selection-with-variance-and-icc" class="section level2">
-<h2>Model selection with Variance and ICC:</h2>
+<div id="variance-and-icc" class="section level2">
+<h2>Variance and ICC:</h2>
 <div id="intraclass-correlation-coefficient-icc-in-mixed-models" class="section level3">
 <h3>Intraclass Correlation Coefficient (ICC) in Mixed Models</h3>
 <p>The Intraclass Correlation Coefficient (ICC) measures the proportion
 of the total variance in the response that is attributable to
 differences between groups (i.e., the random effects).<br />
 In a mixed model, it quantifies how strongly units within the same group
-resemble each other.</p>
+resemble each other.[1]</p>
 <hr />
 <div id="general-definition" class="section level4">
 <h4>General definition</h4>
@@ -600,29 +613,23 @@ variability.</p>
 <p>In a logistic mixed-effects model, the outcome is binary, and the
 level-1 residual variance <span class="math inline">\(\sigma_\varepsilon^2\)</span> is not directly
 estimated because it depends on the logistic distribution.<br />
-Following standard practice (Snijders &amp; Bosker, 2012)[1], this
+Following standard practice (Snijders &amp; Bosker, 2012)[2], this
 variance is approximated as</p>
 <p><span class="math display">\[
 \sigma_\varepsilon^2 = \frac{\pi^2}{3} \approx 3.29.
 \]</span></p>
-<p>For a random-intercept logistic model</p>
-<p><span class="math display">\[
-\text{logit}(P(y_{ij}=1)) = \beta_0 + u_j,
-\]</span></p>
-<p>where <span class="math inline">\(u_j \sim \mathcal{N}(0,
-\sigma_u^2)\)</span>, the ICC becomes</p>
+<p>Therefore the ICC becomes</p>
 <p><span class="math display">\[
 \text{ICC} = \frac{\sigma_u^2}{\sigma_u^2 + \frac{\pi^2}{3}}.
 \]</span></p>
-<p>This represents the proportion of total variance in the latent
-continuous propensity (log-odds scale) explained by group-level
-clustering.</p>
+<p>This represents the proportion of total variance in the log-odds
+scale explained by group-level clustering.</p>
 <hr />
 </div>
 <div id="using-the-icc-for-random-effects-selection" class="section level4">
 <h4>Using the ICC for random effects selection</h4>
 <p>The ICC can be used as a diagnostic to assess whether including
-random effects is justified:</p>
+random effects is justified [1]:</p>
 <ul>
 <li><p>If the ICC is close to zero, between-group variability is
 negligible, and a fixed-effects model (no random intercepts) may
@@ -631,187 +638,135 @@ suffice.</p></li>
 team, season, venue) helps identify which random effects meaningfully
 contribute to the model.</p></li>
 </ul>
-<hr />
-<pre class="r"><code># ------------------------------------------------------------
-# Function to extract variance components &amp; compute ICC
-# ------------------------------------------------------------
-get_icc_components &lt;- function(model) {
-  # Extract random effect variances
-  var_comps &lt;- as.data.frame(VarCorr(model))
-  var_comps_summary &lt;- var_comps[, c(&quot;grp&quot;, &quot;vcov&quot;)]
-  names(var_comps_summary) &lt;- c(&quot;Group&quot;, &quot;Variance&quot;)
-  
-  # Total random-effect variance
-  total_var &lt;- sum(var_comps_summary$Variance)
-  
-  # Logistic residual variance (latent scale)
-  resid_var &lt;- (pi^2) / 3
-  
-  # ICC per grouping factor
-  var_comps_summary$ICC_component &lt;- var_comps_summary$Variance / (total_var + resid_var)
-  
-  # Overall ICC (total random effect contribution)
-  overall_icc &lt;- total_var / (total_var + resid_var)
-  
-  list(
-    random_effect_variances = var_comps_summary,
-    total_random_variance = total_var,
-    residual_variance = resid_var,
-    overall_ICC = overall_icc
-  )
-}
-
-
-# ------------------------------------------------------------
-# Function to visualize ICC components
-# ------------------------------------------------------------
-plot_icc_components &lt;- function(icc_results, title = &quot;Proportion of Total Variance (ICC) 
-                                by Random Effect&quot;) {
-  
-  # Extract ICC data
-  icc_df &lt;- icc_results$random_effect_variances
-  
-  # Create bar plot
-  p &lt;- ggplot(icc_df, aes(x = reorder(Group, ICC_component), y = ICC_component)) +
-    geom_col(fill = &quot;steelblue&quot;, alpha = 0.8) +
-    geom_text(aes(label = round(ICC_component, 3)), hjust = -0.1, size = 3.5) +
-    coord_flip() +
-    labs(
-      title = title,
-      subtitle = paste0(&quot;Overall ICC: &quot;, round(icc_results$overall_ICC, 3)),
-      x = &quot;Random Effect Grouping&quot;, 
-      y = &quot;ICC Component (Proportion of Variance)&quot;
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(face = &quot;bold&quot;, size = 14),
-      plot.subtitle = element_text(size = 11, color = &quot;gray40&quot;),
-      axis.title = element_text(size = 11),
-      axis.text = element_text(size = 10)
-    ) +
-    ylim(0, max(icc_df$ICC_component) * 1.15)  # Add space for labels
-  
-  return(p)
-}
-
-
-# ------------------------------------------------------------
-# Function to create variance decomposition pie chart
-# ------------------------------------------------------------
-plot_variance_decomposition &lt;- function(icc_results) {
-  
-  # Prepare data
-  icc_df &lt;- icc_results$random_effect_variances
-  total_var &lt;- sum(icc_df$Variance) + icc_results$residual_variance
-  
-  # Create dataframe with all variance sources
-  var_df &lt;- data.frame(
-    Source = c(as.character(icc_df$Group), &quot;Residual&quot;),
-    Variance = c(icc_df$Variance, icc_results$residual_variance),
-    Proportion = c(icc_df$Variance / total_var, icc_results$residual_variance / total_var)
-  )
-  
-  # Create pie chart
-  p &lt;- ggplot(var_df, aes(x = &quot;&quot;, y = Proportion, fill = Source)) +
-    geom_bar(stat = &quot;identity&quot;, width = 1, color = &quot;white&quot;) +
-    coord_polar(&quot;y&quot;, start = 0) +
-    geom_text(aes(label = paste0(round(Proportion * 100, 1), &quot;%&quot;)), 
-              position = position_stack(vjust = 0.5), size = 3.5) +
-    labs(
-      title = &quot;Variance Decomposition&quot;,
-      subtitle = &quot;Random Effects vs Residual Variance&quot;,
-      fill = &quot;Variance Source&quot;
-    ) +
-    theme_void() +
-    theme(
-      plot.title = element_text(face = &quot;bold&quot;, size = 14, hjust = 0.5),
-      plot.subtitle = element_text(size = 11, color = &quot;gray40&quot;, hjust = 0.5),
-      legend.position = &quot;right&quot;
-    ) +
-    scale_fill_brewer(palette = &quot;Set2&quot;)
-  
-  return(p)
-}
-
-
-# ------------------------------------------------------------
-# Function to compare multiple models
-# ------------------------------------------------------------
-compare_model_icc &lt;- function(model_list, model_names = NULL) {
-  
-  if (is.null(model_names)) {
-    model_names &lt;- paste0(&quot;Model&quot;, seq_along(model_list))
-  }
-  
-  # Extract ICC for each model
-  icc_list &lt;- lapply(model_list, get_icc_components)
-  
-  # Combine into one dataframe
-  combined_df &lt;- do.call(rbind, lapply(seq_along(icc_list), function(i) {
-    df &lt;- icc_list[[i]]$random_effect_variances
-    df$Model &lt;- model_names[i]
-    return(df)
-  }))
-  
-  # Plot comparison
-  p &lt;- ggplot(combined_df, aes(x = Group, y = ICC_component, fill = Model)) +
-    geom_bar(stat = &quot;identity&quot;, position = &quot;dodge&quot;, alpha = 0.8) +
-    labs(
-      title = &quot;ICC Comparison Across Models&quot;,
-      x = &quot;Random Effect Grouping&quot;,
-      y = &quot;ICC Component&quot;
-    ) +
-    theme_minimal() +
-    theme(
-      plot.title = element_text(face = &quot;bold&quot;, size = 14),
-      axis.text.x = element_text(angle = 45, hjust = 1)
-    ) +
-    scale_fill_brewer(palette = &quot;Set1&quot;)
-  
-  return(list(plot = p, data = combined_df))
-}</code></pre>
-<pre class="r"><code>comparison &lt;- compare_model_icc(
-          model_list = list(model1, model2, model3),
-          model_names = c(&quot;Baseline&quot;, &quot;Extended&quot;, &quot;Full&quot;)
-)
-print(comparison$data)</code></pre>
-<pre><code>##    Group   Variance ICC_component    Model
-## 1  team1 0.51823203    0.11699013 Baseline
-## 2  team2 0.62160722    0.14032693 Baseline
-## 3 season 0.07658203    0.01732092 Extended
-## 4  team1 0.47177118    0.10670269 Extended
-## 5  team2 0.58314027    0.13189156 Extended
-## 6  venue 0.10136732    0.02207886     Full
-## 7  team2 0.62474938    0.13607696     Full
-## 8  team1 0.49735473    0.10832907     Full
-## 9 season 0.07780775    0.01694734     Full</code></pre>
-<pre class="r"><code>print(comparison$plot)</code></pre>
-<p><img role="img" src="data:image/png;base64,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" width="672" /></p>
-<p>We see here that team1 and team2 definitely account for the most
-variance<br />
-across all of the models therefore these two variables are our prime
-candidates.</p>
-<p>Looking at the ICC Component for season it is around 1.7% of the
-variance this shows that it is contributing very little to the
-model.</p>
-<p>The venue effect is also minimal but is larger than the seasons
-affect.</p>
+<p>In particular, high ICC suggests that grouping explains substantial
+variance and indicates practical significance of random effects. This is
+a good indicator of how justified our random effects are.[1],[3]</p>
+<p>We can implement this calculation in R using the <code>icc</code>
+function in the <code>performance</code> package [1]. This package
+supports ICC calculations for the logistic regression mixed -effects
+model. It provides group-level calculations if we set
+<code>by_group = TRUE</code> . Setting <code>by_group = FALSE</code>
+provides two values the unadjusted ICC and the adjusted ICC. The
+adjusted ICC only relates to the random effects, the unadjusted ICC also
+takes the fixed effects variances into account.</p>
 </div>
+</div>
+</div>
+<div id="following-the-documentation" class="section level2">
+<h2>Following the documentation :</h2>
+<pre class="r"><code>icc(model1, by_group = TRUE)</code></pre>
+<pre><code>## # ICC by Group
+## 
+## Group |   ICC
+## -------------
+## team1 | 0.117
+## team2 | 0.140</code></pre>
+<pre class="r"><code>icc(model1)</code></pre>
+<pre><code>## # Intraclass Correlation Coefficient
+## 
+##     Adjusted ICC: 0.257
+##   Unadjusted ICC: 0.211</code></pre>
+<pre class="r"><code>icc(model2, by_group = TRUE)</code></pre>
+<pre><code>## # ICC by Group
+## 
+## Group  |   ICC
+## --------------
+## season | 0.017
+## team1  | 0.107
+## team2  | 0.132</code></pre>
+<pre class="r"><code>icc(model2)</code></pre>
+<pre><code>## # Intraclass Correlation Coefficient
+## 
+##     Adjusted ICC: 0.256
+##   Unadjusted ICC: 0.210</code></pre>
+<pre class="r"><code>icc(model3, by_group = TRUE)</code></pre>
+<pre><code>## # ICC by Group
+## 
+## Group  |   ICC
+## --------------
+## venue  | 0.022
+## team2  | 0.136
+## team1  | 0.108
+## season | 0.017</code></pre>
+<pre class="r"><code>icc(model3)</code></pre>
+<pre><code>## # Intraclass Correlation Coefficient
+## 
+##     Adjusted ICC: 0.283
+##   Unadjusted ICC: 0.232</code></pre>
+<pre class="r"><code>icc(model3.1, by_group = TRUE)</code></pre>
+<pre><code>## boundary (singular) fit: see help(&#39;isSingular&#39;)</code></pre>
+<pre><code>## Warning: Can&#39;t compute random effect variances. Some variance components equal
+##   zero. Your model may suffer from singularity (see `?lme4::isSingular`
+##   and `?performance::check_singularity`).
+##   Decrease the `tolerance` level to force the calculation of random effect
+##   variances, or impose priors on your random effects parameters (using
+##   packages like `brms` or `glmmTMB`).</code></pre>
+<pre><code>## [1] NA</code></pre>
+<pre class="r"><code>#should be NA, just to check
+icc(model4, by_group = TRUE)</code></pre>
+<pre><code>## Warning: `model` has no random effects.</code></pre>
+<pre><code>## NULL</code></pre>
+<div id="results-summary" class="section level3">
+<h3>Results Summary</h3>
+<p>The results from the five models are summarised below, focusing on
+the estimated Intraclass Correlation Coefficients (ICCs), which quantify
+the proportion of total variance explained by the grouping
+structure.</p>
+<p>For the first three models, ICCs were computed for different grouping
+variables:</p>
+<ul>
+<li><strong>Model 1</strong>: ICCs for <code>team1</code> (0.117) and
+<code>team2</code> (0.140), with an adjusted ICC of 0.257.<br />
+</li>
+<li><strong>Model 2</strong>: ICCs for <code>season</code> (0.017),
+<code>team1</code> (0.107), and <code>team2</code> (0.132), with an
+adjusted ICC of 0.256.<br />
+</li>
+<li><strong>Model 3</strong>: ICCs for <code>venue</code> (0.022),
+<code>team2</code> (0.136), <code>team1</code> (0.108), and
+<code>season</code> (0.017), with an adjusted ICC of 0.283.</li>
+</ul>
+<p>Across these models, the ICC values for <code>team1</code> and
+<code>team2</code> remain consistently higher than those for
+<code>season</code> or <code>venue</code>, indicating that a notable
+proportion of the response variance is attributable to differences
+between teams. In contrast, <code>season</code> and <code>venue</code>
+show very low ICC values, suggesting limited within-group correlation
+for these effects.</p>
+<p>Based on these results, we can infer that <code>team1</code> and
+<code>team2</code> are optimal candidates for inclusion as random
+effects in the model, as they capture meaningful within-group
+variability. Including additional random effects such as
+<code>season</code> or <code>venue</code> does not appear to
+substantially improve model fit and may introduce unnecessary
+complexity.</p>
+<p>The fourth model produced a singular fit warning, meaning one or more
+random effect variances were estimated as zero. This suggests that the
+model is overparameterised or that one of the random effects does not
+contribute to explaining variance in the data. As a result, Model 4 is
+not a valid fit and should be excluded from interpretation.</p>
+<p>In summary, the ICC analysis indicates that a model including only
+<code>team1</code> and <code>team2</code> as random effects (as in Model
+1) is likely to perform best, as these effects explain the most
+substantial within-group variance without overfitting.</p>
 </div>
 </div>
 <div id="model-selection-by-predictive-measures" class="section level2">
 <h2>Model Selection by Predictive Measures:</h2>
-<pre class="r"><code># ============================================================================
-# Model Evaluation Function for GLMMs
-# ============================================================================
+<p>Now, finally, in order to decide which model we will use we do one
+last check of the different predicitive measure to check how well our
+models perform on test data.</p>
+<p>We make a function which takes in the model, the training data and
+the test data and creates a list of various predictive measures:</p>
+<pre class="r"><code># Model Evaluation Function for GLMMs
+
 
 evaluate_glmm_model &lt;- function(model, train_data, test_data, 
                                 model_name = &quot;GLMM Model&quot;,
                                 threshold = 0.5) {
-  
-  # -------------------------------------------------------------------------
+
   #  Get predictions on training and test data
-  # -------------------------------------------------------------------------
+
   
   # Training predictions
   train_pred_prob &lt;- predict(model, newdata = train_data, type = &quot;response&quot;, 
@@ -825,9 +780,9 @@ evaluate_glmm_model &lt;- function(model, train_data, test_data,
   test_pred_class &lt;- ifelse(test_pred_prob &gt; threshold, 1, 0)
   test_actual &lt;- test_data$winner_binary
   
-  # -------------------------------------------------------------------------
+
   #  ROC and AUC
-  # -------------------------------------------------------------------------
+
   
   # Training ROC
   train_roc &lt;- roc(train_actual, train_pred_prob, quiet = TRUE)
@@ -837,9 +792,9 @@ evaluate_glmm_model &lt;- function(model, train_data, test_data,
   test_roc &lt;- roc(test_actual, test_pred_prob, quiet = TRUE)
   test_auc &lt;- auc(test_roc)
   
-  # -------------------------------------------------------------------------
+
   #  Confusion Matrix and derived metrics
-  # -------------------------------------------------------------------------
+
   
   # Training confusion matrix
   train_cm &lt;- table(Predicted = train_pred_class, Actual = train_actual)
@@ -849,9 +804,9 @@ evaluate_glmm_model &lt;- function(model, train_data, test_data,
   test_cm &lt;- table(Predicted = test_pred_class, Actual = test_actual)
   test_accuracy &lt;- sum(diag(test_cm)) / sum(test_cm)
   
-  # -------------------------------------------------------------------------
-  #  Precision, Recall, F1-Score
-  # -------------------------------------------------------------------------
+
+  #  Precision, Recall
+
   
   # Training metrics
   train_tp &lt;- train_cm[2, 2]
@@ -861,7 +816,6 @@ evaluate_glmm_model &lt;- function(model, train_data, test_data,
   
   train_precision &lt;- train_tp / (train_tp + train_fp)
   train_recall &lt;- train_tp / (train_tp + train_fn)
-  train_f1 &lt;- 2 * (train_precision * train_recall) / (train_precision + train_recall)
   train_specificity &lt;- train_tn / (train_tn + train_fp)
   
   # Test metrics
@@ -872,16 +826,14 @@ evaluate_glmm_model &lt;- function(model, train_data, test_data,
   
   test_precision &lt;- test_tp / (test_tp + test_fp)
   test_recall &lt;- test_tp / (test_tp + test_fn)
-  test_f1 &lt;- 2 * (test_precision * test_recall) / (test_precision + test_recall)
   test_specificity &lt;- test_tn / (test_tn + test_fp)
 
   
 
   
   
-  # -------------------------------------------------------------------------
   # Return results
-  # -------------------------------------------------------------------------
+
   
   results &lt;- list(
     model_name = model_name,
@@ -893,7 +845,6 @@ evaluate_glmm_model &lt;- function(model, train_data, test_data,
       precision = train_precision,
       recall = train_recall,
       specificity = train_specificity,
-      f1_score = train_f1,
       confusion_matrix = train_cm,
       predictions = data.frame(
         actual = train_actual,
@@ -909,7 +860,6 @@ evaluate_glmm_model &lt;- function(model, train_data, test_data,
       precision = test_precision,
       recall = test_recall,
       specificity = test_specificity,
-      f1_score = test_f1,
       confusion_matrix = test_cm,
       predictions = data.frame(
         actual = test_actual,
@@ -933,9 +883,9 @@ the AUC metric.</p>
 res2 &lt;- evaluate_glmm_model(model2, train_scaled, test_scaled, &quot;Extended&quot;)
 res3 &lt;- evaluate_glmm_model(model3, train_scaled, test_scaled, &quot;Hybrid&quot;)
 
-# -------------------------------------------------------------------------
+
 #  Create a summary table of all model metrics
-# -------------------------------------------------------------------------
+
 
 summary_table &lt;- bind_rows(
   data.frame(
@@ -945,8 +895,7 @@ summary_table &lt;- bind_rows(
     Accuracy = res1$train$accuracy,
     Precision = res1$train$precision,
     Recall = res1$train$recall,
-    Specificity = res1$train$specificity,
-    F1 = res1$train$f1_score
+    Specificity = res1$train$specificity
   ),
   data.frame(
     Model = res1$model_name,
@@ -955,8 +904,7 @@ summary_table &lt;- bind_rows(
     Accuracy = res1$test$accuracy,
     Precision = res1$test$precision,
     Recall = res1$test$recall,
-    Specificity = res1$test$specificity,
-    F1 = res1$test$f1_score
+    Specificity = res1$test$specificity
   ),
   data.frame(
     Model = res2$model_name,
@@ -965,8 +913,7 @@ summary_table &lt;- bind_rows(
     Accuracy = res2$train$accuracy,
     Precision = res2$train$precision,
     Recall = res2$train$recall,
-    Specificity = res2$train$specificity,
-    F1 = res2$train$f1_score
+    Specificity = res2$train$specificity
   ),
   data.frame(
     Model = res2$model_name,
@@ -975,8 +922,7 @@ summary_table &lt;- bind_rows(
     Accuracy = res2$test$accuracy,
     Precision = res2$test$precision,
     Recall = res2$test$recall,
-    Specificity = res2$test$specificity,
-    F1 = res2$test$f1_score
+    Specificity = res2$test$specificity
   ),
   data.frame(
     Model = res3$model_name,
@@ -985,8 +931,7 @@ summary_table &lt;- bind_rows(
     Accuracy = res3$train$accuracy,
     Precision = res3$train$precision,
     Recall = res3$train$recall,
-    Specificity = res3$train$specificity,
-    F1 = res3$train$f1_score
+    Specificity = res3$train$specificity
   ),
   data.frame(
     Model = res3$model_name,
@@ -995,8 +940,7 @@ summary_table &lt;- bind_rows(
     Accuracy = res3$test$accuracy,
     Precision = res3$test$precision,
     Recall = res3$test$recall,
-    Specificity = res3$test$specificity,
-    F1 = res3$test$f1_score
+    Specificity = res3$test$specificity
   )
 )
 
@@ -1005,13 +949,13 @@ summary_table &lt;- summary_table %&gt;%
   mutate(across(where(is.numeric), ~ round(.x, 3)))
 
 print(summary_table)</code></pre>
-<pre><code>##      Model  Dataset   AUC Accuracy Precision Recall Specificity    F1
-## 1 Baseline Training 0.814    0.747     0.757  0.805       0.675 0.780
-## 2 Baseline     Test 0.750    0.731     0.729  0.823       0.616 0.773
-## 3 Extended Training 0.822    0.754     0.764  0.807       0.688 0.785
-## 4 Extended     Test 0.761    0.735     0.730  0.831       0.616 0.777
-## 5   Hybrid Training 0.836    0.760     0.764  0.821       0.683 0.792
-## 6   Hybrid     Test 0.757    0.731     0.732  0.815       0.626 0.771</code></pre>
+<pre><code>##      Model  Dataset   AUC Accuracy Precision Recall Specificity
+## 1 Baseline Training 0.814    0.747     0.757  0.805       0.675
+## 2 Baseline     Test 0.750    0.731     0.729  0.823       0.616
+## 3 Extended Training 0.822    0.754     0.764  0.807       0.688
+## 4 Extended     Test 0.761    0.735     0.730  0.831       0.616
+## 5   Hybrid Training 0.836    0.760     0.764  0.821       0.683
+## 6   Hybrid     Test 0.757    0.731     0.732  0.815       0.626</code></pre>
 <p>From this table we can see that the hybrid model does the best in
 training and it doesn’t do as well in the test across all of the metrics
 considered.</p>
@@ -1022,9 +966,8 @@ shows that the model is not overfitting.</p>
 </div>
 <div id="roc-curves-visualisation" class="section level2">
 <h2>ROC Curves Visualisation</h2>
-<pre class="r"><code># -------------------------------------------------------------------------
-#  Combine ROC curves for visualisation
-# -------------------------------------------------------------------------
+<pre class="r"><code>#  Combine ROC curves for visualisation
+
 
 roc_data_test &lt;- data.frame(
   FPR = c(1 - res1$roc_test$specificities,
@@ -1039,9 +982,9 @@ roc_data_test &lt;- data.frame(
                                length(res3$roc_test$specificities))))
 )
 
-# -------------------------------------------------------------------------
+
 # Plot Test ROC curves 
-# -------------------------------------------------------------------------
+
 ggplot(roc_data_test, aes(x = FPR, y = TPR, color = Model)) +
   geom_line(linewidth = 1.2) +
   geom_abline(intercept = 0, slope = 1, color = &quot;gray60&quot;, linetype = &quot;dashed&quot;) +
@@ -1079,24 +1022,193 @@ across the board in terms of model selection optimal in the sense of
 AIC,BIC,and optimally in the sense of maximizing the test AUC - is our
 best model for the classification task of predicting the outcome of a
 cricket match based on the first innings and the first 10 overs.</p>
+</div>
+<div id="saving-results-to-a-csv" class="section level2">
+<h2>Saving results to a CSV:</h2>
+<p>Here we save the best performing model to a dataframe in order to
+combine it with our other models</p>
+<pre class="r"><code>roc_glmm &lt;- data.frame(
+  FPR = c(1 - res2$roc_test$specificities),
+  TPR = c(res2$roc_test$sensitivities))
+
+write.csv(roc_glmm,&quot;roc_glmm.csv&quot;)</code></pre>
+</div>
+</div>
+<div id="looking-at-our-winner" class="section level1">
+<h1>Looking at our Winner:</h1>
+<pre class="r"><code>summary(model2)</code></pre>
+<pre><code>## Generalized linear mixed model fit by maximum likelihood (Laplace
+##   Approximation) [glmerMod]
+##  Family: binomial  ( logit )
+## Formula: 
+## winner_binary ~ runs_difference + wickets_difference + team1_dot_ball_percentage +  
+##     run_rate_difference + toss_won_by_team1 + (1 | season) +  
+##     (1 | team1) + (1 | team2)
+##    Data: train_scaled
+## Control: glmerControl(optimizer = &quot;bobyqa&quot;, optCtrl = list(maxfun = 1e+05))
+## 
+##       AIC       BIC    logLik -2*log(L)  df.resid 
+##    1044.7    1087.9    -513.3    1026.7       886 
+## 
+## Scaled residuals: 
+##     Min      1Q  Median      3Q     Max 
+## -3.7191 -0.7282  0.3207  0.6840  2.7180 
+## 
+## Random effects:
+##  Groups Name        Variance Std.Dev.
+##  season (Intercept) 0.07658  0.2767  
+##  team1  (Intercept) 0.47177  0.6869  
+##  team2  (Intercept) 0.58314  0.7636  
+## Number of obs: 895, groups:  season, 22; team1, 22; team2, 22
+## 
+## Fixed effects:
+##                            Estimate Std. Error z value Pr(&gt;|z|)    
+## (Intercept)                0.406593   0.268042   1.517 0.129291    
+## runs_difference            0.476426   0.214834   2.218 0.026579 *  
+## wickets_difference        -0.357855   0.108111  -3.310 0.000933 ***
+## team1_dot_ball_percentage -0.153276   0.186838  -0.820 0.412005    
+## run_rate_difference        0.146124   0.129612   1.127 0.259577    
+## toss_won_by_team1          0.009225   0.164707   0.056 0.955336    
+## ---
+## Signif. codes:  0 &#39;***&#39; 0.001 &#39;**&#39; 0.01 &#39;*&#39; 0.05 &#39;.&#39; 0.1 &#39; &#39; 1
+## 
+## Correlation of Fixed Effects:
+##             (Intr) rns_df wckts_ tm1___ rn_rt_
+## runs_dffrnc -0.034                            
+## wckts_dffrn -0.012  0.002                     
+## tm1_dt_bll_ -0.080  0.780 -0.241              
+## rn_rt_dffrn  0.012 -0.586  0.202 -0.314       
+## tss_wn_by_1 -0.289  0.039  0.010  0.033 -0.055</code></pre>
+<p>The model above is specified below mathematically:</p>
+<p>We model each match outcome <span class="math inline">\(Y_i\)</span>
+as a Bernoulli random variable with probability <span class="math inline">\(p_i\)</span> that the batting team wins. Using the
+logit link, the model is</p>
+<p><span class="math display">\[
+Y_i \sim \text{Bernoulli}(p_i),\qquad p_i = g^{-1}(\eta_i) =
+\mathrm{logit}^{-1}(\eta_i),
+\]</span></p>
+<p>with linear predictor</p>
+<p><span class="math display">\[
+\eta_i = \beta_0
+        + \beta_1\,\text{runs_difference}_i
+        + \beta_2\,\text{wickets_difference}_i
+        + \beta_3\,\text{team1_dot_ball_percentage}_i
+        + \beta_4\,\text{run_rate_difference}_i
+        + \beta_5\,\text{toss_won_by_team1}_i
+        + b_{\text{season}(i)} + b_{\text{team1}(i)} +
+b_{\text{team2}(i)}.
+\]</span></p>
+<p>Here <span class="math inline">\(b_{\text{season}(i)}\)</span> is the
+random intercept for the season of observation <span class="math inline">\(i\)</span>, <span class="math inline">\(b_{\text{team1}(i)}\)</span> is the random
+intercept for the batting team in observation <span class="math inline">\(i\)</span>, and <span class="math inline">\(b_{\text{team2}(i)}\)</span> is the random
+intercept for the bowling/chasing team in observation <span class="math inline">\(i\)</span>.</p>
+<p>The random effects are assumed independent (across grouping factors)
+and normally distributed:</p>
+<p><span class="math display">\[
+b_{\text{season}(i)} \overset{\text{i.i.d.}}{\sim}
+N(0,\sigma_{\text{season}}^2)
+\]</span></p>
+<p><span class="math display">\[
+b_{\text{team1}(i)} \overset{\text{i.i.d.}}{\sim}
+N(0,\sigma_{\text{team1}}^2)
+\]</span></p>
+<p><span class="math display">\[
+b_{\text{team2}(i)} \overset{\text{i.i.d.}}{\sim}
+N(0,\sigma_{\text{team2}}^2)
+\]</span></p>
+<p>Equivalently, if we collect the random intercepts into a vector <span class="math inline">\(u = (b_{\text{season}}, b_{\text{team1}},
+b_{\text{team2}})^\top\)</span>, the block-diagonal covariance
+(variance-component) matrix <span class="math inline">\(G\)</span>
+is</p>
+<p><span class="math display">\[
+G = \mathrm{diag}\big(\sigma_{\text{season}}^2,\;
+\sigma_{\text{team1}}^2,\; \sigma_{\text{team2}}^2\big).
+\]</span></p>
+<p>Using the estimates provided, the fitted parameter values are</p>
+<ul>
+<li><p>fixed effects <span class="math display">\[
+\begin{aligned}
+\hat\beta_0 &amp;= 0.406593,\quad(\text{intercept}),\\
+\hat\beta_1 &amp;= 0.476426\quad(\text{runs_difference}),\\
+\hat\beta_2 &amp;= -0.357854\quad(\text{wickets_difference}),\\
+\hat\beta_3 &amp;= -0.153276\quad(\text{team1_dot_ball_percentage}),\\
+\hat\beta_4 &amp;= 0.146124\quad(\text{run_rate_difference}),\\
+\hat\beta_5 &amp;= 0.009225\quad(\text{toss_won_by_team1}).
+\end{aligned}
+\]</span></p></li>
+<li><p>random-effect variances <span class="math display">\[
+\hat\sigma_{\text{season}}^2 = 0.07658,\qquad
+\hat\sigma_{\text{team1}}^2 = 0.47177,\qquad
+\hat\sigma_{\text{team2}}^2 = 0.58314.
+\]</span></p></li>
+</ul>
+<p>Thus the fitted linear predictor for observation <span class="math inline">\(i\)</span> is</p>
+<p><span class="math display">\[
+\hat\eta_i = 0.406593
+        + 0.476426\cdot\text{runs_difference}_i
+        - 0.357854\cdot\text{wickets_difference}_i
+        - 0.153276\cdot\text{team1_dot_ball_percentage}_i
+        + 0.146124\cdot\text{run_rate_difference}_i
+        + 0.009225\cdot\text{toss_won_by_team1}_i
+        + \hat b_{\text{season}(i)} + \hat b_{\text{team1}(i)} + \hat
+b_{\text{team2}(i)}.
+\]</span></p>
+<p>and the predicted probability is</p>
+<p><span class="math display">\[
+\hat p_i =
+\mathrm{logit}^{-1}(\hat\eta_i)=\frac{\exp(\hat\eta_i)}{1+\exp(\hat\eta_i)}.
+\]</span></p>
+<p>Interpretation:</p>
+<ul>
+<li>The estimates are interpreted as follows, one unit increase in the
+runs difference is associated with a 0.476 increase in the expected log
+odds of team 1 winning. This makes sense as an increase in the runs
+difference = runs of team1 - runs of team2, should lead to increase in
+the odds of team 1 winning.</li>
+<li>The variance estimates quantify between-group variability on the
+linear predictor (log-odds) scale: for example, <span class="math inline">\(\sigma_{\text{team2}}^2=0.58314\)</span> means
+team-to-team differences (as team2) contribute variance <span class="math inline">\(0.58314\)</span> to the linear predictor.</li>
+</ul>
+<div id="conclusion" class="section level2">
+<h2>Conclusion:</h2>
+<p>We first defined the structure of the Generalized Linear Mixed Model
+(GLMM) and specified an appropriate link function for the binary
+response. The selection of fixed effects was guided by domain expertise
+and statistical diagnostics, highly correlated and collinear variables
+were identified and removed to ensure model stability.</p>
+<p>Next, we evaluated several candidate random effects structures.
+Through comparison of model performance metrics, we found that including
+<strong>season</strong>, <strong>team1</strong>, and
+<strong>team2</strong> as random effects yielded the highest AUC among
+all configurations.</p>
+<p>However, the Intraclass Correlation Coefficient (ICC) analysis
+suggests that the <strong>season</strong> effect contributes minimally
+to the within-group variance. This implies that excluding the season
+random effect could lead to a more simplified model without
+substantially reducing predictive performance.</p>
+<p>When compared with Dan’s regularised logistic regression model, the
+GLMM did not achieve a higher AUC nor did it dominate his ROC curve.
+This is somewhat unexpected, as the inclusion of random effects would
+typically be expected to enhance model performance by capturing
+group-level variation.</p>
+<p>Several factors may explain this result. It is possible that the
+estimation procedure was limited by the efficiency of the likelihood
+approximation used, or that the absence of regularisation allowed some
+degree of overfitting. This is motivated by the observation that the
+unregularised logistic regression model produced the same AUC of 0.761.
+Future work could explore the use of Bayesian estimation methods, such
+as MCMC, to obtain more accurate likelihood estimates and potentially
+improve model performance.</p>
 <div id="references" class="section level4">
 <h4>References</h4>
 <ul>
-<li>Snijders, T. A. B., &amp; Bosker, R. J. (2012). <em>Multilevel
+<li>[1] <a href="https://easystats.github.io/performance/reference/icc.html" class="uri">https://easystats.github.io/performance/reference/icc.html</a></li>
+<li>[2] Snijders, T. A. B., &amp; Bosker, R. J. (2012). <em>Multilevel
 Analysis: An Introduction to Basic and Advanced Multilevel Modeling</em>
 (2nd ed.). Sage.<br />
 </li>
-<li>Goldstein, H., Browne, W., &amp; Rasbash, J. (2002). <em>Multilevel
-modelling of medical data</em>. <em>Statistics in Medicine</em>, 21(21),
-3291–3315.<br />
-</li>
-<li>Nakagawa, S., &amp; Schielzeth, H. (2010). <em>Repeatability for
-Gaussian and non-Gaussian data: a practical guide for biologists</em>.
-<em>Biological Reviews</em>, 85(4), 935–956.<br />
-</li>
-<li>Hox, J., Moerbeek, M., &amp; van de Schoot, R. (2017).
-<em>Multilevel Analysis: Techniques and Applications</em> (3rd ed.).
-Routledge.</li>
+<li>[3] Hox, J. (2010). <em>Multilevel Analysis: Techniques and
+Applications</em> (2nd Edition). Routledge.</li>
 </ul>
 </div>
 </div>
